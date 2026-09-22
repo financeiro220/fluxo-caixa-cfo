@@ -3,27 +3,69 @@ import pandas as pd
 import numpy as np
 
 # ---------------------------------------------------------
-# CONFIGURAÇÃO DA PÁGINA E TEMA
+# CONFIGURAÇÃO DA PÁGINA E TEMA BORELLI
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="Fluxo de Caixa Executivo - CFO",
-    page_icon="📊",
+    page_title="Gelateria Borelli - Fluxo de Caixa CFO",
+    page_icon="🟢",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Estilização Personalizada (CSS)
+# Estilização CSS Personalizada (Identidade Borelli)
 st.markdown("""
 <style>
-    .main-header { font-size: 26px; font-weight: bold; color: #1B365D; margin-bottom: 5px; }
-    .sub-header { font-size: 14px; color: #555; margin-bottom: 25px; }
+    /* Fundo Global */
+    .stApp {
+        background-color: #0E1117;
+        color: #FFFFFF;
+    }
+    
+    /* Cabeçalho Principal */
+    .main-title {
+        font-size: 28px;
+        font-weight: bold;
+        color: #00875A;
+        margin-bottom: 5px;
+    }
+    .main-subtitle {
+        font-size: 14px;
+        color: #A0AAB0;
+        margin-bottom: 20px;
+    }
+
+    /* Cards de KPIs */
+    .kpi-card {
+        background-color: #161B22;
+        border: 1px solid #30363D;
+        border-radius: 8px;
+        padding: 18px;
+        text-align: left;
+    }
+    .kpi-label {
+        font-size: 13px;
+        color: #8B949E;
+        font-weight: 600;
+        text-transform: uppercase;
+    }
+    .kpi-value {
+        font-size: 24px;
+        font-weight: bold;
+        color: #FFFFFF;
+        margin-top: 5px;
+    }
+    .kpi-green { border-left: 5px solid #00875A; }
+    .kpi-red { border-left: 5px solid #FF4D4D; }
+    .kpi-blue { border-left: 5px solid #3182CE; }
+    
+    /* Card de Boas-Vindas */
     .welcome-card {
-        background-color: #F8F9FA;
-        border: 1px solid #E9ECEF;
-        border-left: 6px solid #1B365D;
+        background-color: #161B22;
+        border: 1px solid #30363D;
+        border-left: 6px solid #00875A;
         border-radius: 8px;
         padding: 25px;
-        margin-top: 15px;
+        margin-top: 20px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -78,10 +120,10 @@ def processar_arquivo_bruto(file):
     return df
 
 # ---------------------------------------------------------
-# CABEÇALHO FIXO DA APLICAÇÃO
+# CABEÇALHO DA PÁGINA
 # ---------------------------------------------------------
-st.markdown("<div class='main-header'>📊 Painel Executivo - Fluxo de Caixa do Grupo</div>", unsafe_allow_html=True)
-st.markdown("<div class='sub-header'>Gestão Estratégica de Liquidez e Governança Financeira</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-title'>🍦 Gelateria Borelli - Gestão de Fluxo de Caixa</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-subtitle'>Acompanhamento diário de liquidez e gestão estratégica financeira</div>", unsafe_allow_html=True)
 
 # BARRA LATERAL
 with st.sidebar:
@@ -92,46 +134,92 @@ with st.sidebar:
     uploaded_file = st.file_uploader("Anexe o relatório (.xlsx)", type=["xlsx", "xls"])
 
 # ---------------------------------------------------------
-# RENDERIZAÇÃO DA TELA
+# RENDERIZAÇÃO
 # ---------------------------------------------------------
 if uploaded_file is not None:
     try:
         df = processar_arquivo_bruto(uploaded_file)
         
-        # Filtros no topo
-        col_f1, col_f2 = st.columns(2)
-        with col_f1:
-            lojas_sel = st.multiselect(
-                "Unidades / Lojas:",
-                options=df['Empresa'].dropna().unique(),
-                default=df['Empresa'].dropna().unique()
-            )
-        with col_f2:
-            dias_sel = st.slider("Período (Dias do Mês):", min_value=1, max_value=31, value=(1, 31))
-            
-        df_filtered = df[
-            (df['Empresa'].isin(lojas_sel)) & 
-            (df['Dia'] >= dias_sel[0]) & 
-            (df['Dia'] <= dias_sel[1])
-        ].copy()
+        # Obter intervalo de datas do arquivo
+        min_date = df['Vencimento_dt'].min().date() if not df['Vencimento_dt'].isnull().all() else pd.to_datetime('today').date()
+        max_date = df['Vencimento_dt'].max().date() if not df['Vencimento_dt'].isnull().all() else pd.to_datetime('today').date()
+
+        # FILTROS SUPERIORES (Estilo Borelli Dashboard)
+        col_filtro1, col_filtro2 = st.columns([2, 1])
         
-        # KPIs
+        with col_filtro1:
+            st.caption("🏢 **Filtrar por Unidade / Loja:**")
+            lojas_disponiveis = list(df['Empresa'].dropna().unique())
+            lojas_opcoes = ["Ver Todas as Lojas"] + lojas_disponiveis
+            loja_selecionada = st.radio("", lojas_opcoes, horizontal=True)
+
+        with col_filtro2:
+            st.caption("📅 **Período de Vencimento:**")
+            date_range = st.date_input(
+                "",
+                value=(min_date, max_date),
+                min_value=min_date,
+                max_value=max_date,
+                format="DD/MM/YYYY"
+            )
+
+        # Aplicação dos Filtros
+        if loja_selecionada == "Ver Todas as Lojas":
+            df_filtered = df.copy()
+        else:
+            df_filtered = df[df['Empresa'] == loja_selecionada].copy()
+
+        if isinstance(date_range, tuple) and len(date_range) == 2:
+            start_date, end_date = date_range
+            df_filtered = df_filtered[
+                (df_filtered['Vencimento_dt'].dt.date >= start_date) & 
+                (df_filtered['Vencimento_dt'].dt.date <= end_date)
+            ]
+
+        st.divider()
+
+        # KPIs REESTILIZADOS
         tot_previsto = df_filtered['Valor'].sum()
         tot_realizado = df_filtered[df_filtered['Status_Clean'] == 'REALIZADO']['Valor'].sum()
         tot_pendente = df_filtered[df_filtered['Status_Clean'] == 'PENDENTE']['Valor'].sum()
-        
+
         k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Saldo Inicial", f"R$ {saldo_inicial:,.2f}")
-        k2.metric("Total Previsto", f"R$ {tot_previsto:,.2f}")
-        k3.metric("Total Liquidado", f"R$ {tot_realizado:,.2f}")
-        k4.metric("Total Pendente", f"R$ {tot_pendente:,.2f}")
-        
-        st.divider()
-        
+        with k1:
+            st.markdown(f"""
+            <div class='kpi-card kpi-blue'>
+                <div class='kpi-label'>Saldo Inicial</div>
+                <div class='kpi-value'>R$ {saldo_inicial:,.2f}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with k2:
+            st.markdown(f"""
+            <div class='kpi-card kpi-green'>
+                <div class='kpi-label'>Total Previsto</div>
+                <div class='kpi-value'>R$ {tot_previsto:,.2f}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with k3:
+            st.markdown(f"""
+            <div class='kpi-card kpi-red'>
+                <div class='kpi-label'>Total Liquidado</div>
+                <div class='kpi-value'>R$ {tot_realizado:,.2f}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with k4:
+            st.markdown(f"""
+            <div class='kpi-card kpi-green'>
+                <div class='kpi-label'>Total Pendente</div>
+                <div class='kpi-value'>R$ {tot_pendente:,.2f}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # ABAS DE RELATÓRIO
         tab1, tab2, tab3, tab4 = st.tabs(["📋 DRE de Caixa", "📅 Fluxo Diário", "🏪 Por Loja", "🔍 Base Tratada"])
         
         with tab1:
-            st.subheader("Demonstrativo do Fluxo de Caixa (Previsto vs. Realizado)")
+            st.subheader("Demonstrativo de Saídas (Previsto vs. Realizado)")
             cats = [
                 "1. FORNECEDORES / MERCADORIAS (CMV)",
                 "2. IMPOSTOS SOBRE VENDAS",
@@ -155,36 +243,34 @@ if uploaded_file is not None:
             st.dataframe(pd.DataFrame(dre_list), use_container_width=True, hide_index=True)
             
         with tab2:
-            st.subheader("Matriz Diária de Vencimentos")
+            st.subheader("Vencimentos Diários")
             pivot_daily = df_filtered.pivot_table(index='Categoria_CFO', columns='Dia', values='Valor', aggfunc='sum', fill_value=0)
             st.dataframe(pivot_daily.style.format("R$ {:,.2f}"), use_container_width=True)
             
-            st.subheader("Curva Diária de Saídas")
+            st.subheader("Curva de Desembolso")
             daily_chart = df_filtered.groupby('Dia')['Valor'].sum().reset_index()
             st.line_chart(daily_chart.set_index('Dia'))
             
         with tab3:
-            st.subheader("Comparativo por Unidade de Negócio")
+            st.subheader("Comparativo entre Lojas")
             pivot_store = df_filtered.pivot_table(index='Categoria_CFO', columns='Empresa', values='Valor', aggfunc='sum', fill_value=0)
             st.dataframe(pivot_store.style.format("R$ {:,.2f}"), use_container_width=True)
             st.bar_chart(pivot_store)
             
         with tab4:
-            st.subheader("Lançamentos Categorizados")
+            st.subheader("Base de Dados Tratada")
             st.dataframe(df_filtered[['Número', 'Empresa', 'Cliente / Fornecedor', 'Vencimento', 'Valor', 'Plano de Contas', 'Categoria_CFO', 'Status_Clean']], use_container_width=True, hide_index=True)
 
     except Exception as e:
         st.error(f"Erro ao processar o arquivo: {e}")
 else:
-    # CARDE DE BOAS-VINDAS QUANDO NÃO HÁ ARQUIVO
     st.markdown("""
     <div class='welcome-card'>
-        <h3>👋 Bem-vindo ao Sistema de Fluxo de Caixa Executivo</h3>
-        <p>Para carregar os indicadores, relatórios e gráficos das lojas, siga os passos:</p>
+        <h3>🍦 Painel de Fluxo de Caixa Executivo - Gelateria Borelli</h3>
+        <p>Aguardando carga do relatório para inicializar o processamento.</p>
         <ol>
             <li>Acesse o menu lateral à esquerda <b>(📥 Carga de Dados)</b>.</li>
-            <li>Clique em <b>Browse files</b> e selecione o relatório <b>.xlsx</b> do ERP.</li>
-            <li>O sistema processará as categorias e exibirá o painel automaticamente.</li>
+            <li>Faça o upload do arquivo <b>.xlsx</b> retirado do ERP.</li>
         </ol>
     </div>
     """, unsafe_allow_html=True)
