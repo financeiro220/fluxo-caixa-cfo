@@ -6,7 +6,7 @@ import numpy as np
 # CONFIGURAÇÃO DA PÁGINA E TEMA BORELLI
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="Gelateria Borelli - Fluxo de Caixa CFO",
+    page_title="Gelateria Borelli - Gestão de Fluxo de Caixa",
     page_icon="🟢",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -70,7 +70,6 @@ def processar_fluxo_caixa_loja(file, nome_loja):
     
     df_raw = pd.read_excel(file, sheet_name=sheet_name)
     
-    # Identificar linha de cabeçalho
     header_row = None
     for idx, row in df_raw.iterrows():
         row_str = " ".join(row.dropna().astype(str))
@@ -86,12 +85,10 @@ def processar_fluxo_caixa_loja(file, nome_loja):
         
     df.columns = [str(c).strip() for c in df.columns]
     
-    # Tratamento de Colunas de Entradas, Saídas e Saldo
     df['Vencimento_dt'] = pd.to_datetime(df['Data'], errors='coerce')
     df = df.dropna(subset=['Vencimento_dt']).copy()
     df['Dia'] = df['Vencimento_dt'].dt.day
     
-    # Identificar colunas 'Total' de entrada e saída
     cols_total = [i for i, col in enumerate(df.columns) if col == 'Total']
     
     if len(cols_total) >= 2:
@@ -101,7 +98,7 @@ def processar_fluxo_caixa_loja(file, nome_loja):
         df['Entradas'] = 0.0
         df['Saídas'] = 0.0
 
-    df['Saldo'] = pd.to_numeric(df['Saldo'], errors='coerce').fillna(0)
+    df['Saldo_Banco'] = pd.to_numeric(df['Saldo'], errors='coerce').fillna(0)
     df['Empresa'] = nome_loja
     
     return df
@@ -139,12 +136,8 @@ def processar_arquivo_despesas(file):
 st.markdown("<div class='main-title'>🍦 Gelateria Borelli - Gestão de Fluxo de Caixa</div>", unsafe_allow_html=True)
 st.markdown("<div class='main-subtitle'>Acompanhamento de liquidez, governança e extrato acumulado diário</div>", unsafe_allow_html=True)
 
-# BARRA LATERAL
+# BARRA LATERAL (SEM SALDO INICIAL MANUAL)
 with st.sidebar:
-    st.header("⚙️ Parâmetros")
-    saldo_inicial = st.number_input("Saldo Inicial em Conta (R$)", value=24053.13, step=1000.0, format="%.2f")
-    
-    st.divider()
     st.header("📥 Relatório ERP (Despesas)")
     uploaded_file = st.file_uploader("Anexe o Rateio de Títulos (.xlsx)", type=["xlsx", "xls"])
     
@@ -220,37 +213,38 @@ if uploaded_file is not None:
 
         st.divider()
 
-        # CÁLCULO DOS KPIS DE EXTRATO BANCO
+        # CÁLCULO DOS KPIS REAIS DE EXTRATO BANCO
         tot_entradas_loja = df_lojas_filtered['Entradas'].sum() if not df_lojas_filtered.empty else 0.0
         tot_previsto = df_desp_filtered['Valor'].sum()
         tot_realizado = df_desp_filtered[df_desp_filtered['Status_Clean'] == 'REALIZADO']['Valor'].sum()
         tot_pendente = df_desp_filtered[df_desp_filtered['Status_Clean'] == 'PENDENTE']['Valor'].sum()
         
-        geracao_caixa = (saldo_inicial + tot_entradas_loja) - tot_realizado
+        # Saldo Final Real Extraído da Planilha no último dia do filtro
+        if not df_lojas_filtered.empty:
+            saldo_atual_banco = df_lojas_filtered.sort_values('Vencimento_dt')['Saldo_Banco'].iloc[-1]
+        else:
+            saldo_atual_banco = 0.0
 
         st.caption("👇 **Clique nos botões para filtrar os títulos na tabela inferior:**")
 
         # KPIS
-        k1, k2, k3, k4, k5 = st.columns(5)
-        
-        with k1:
-            st.metric("Saldo Inicial", f"R$ {saldo_inicial:,.2f}")
+        k1, k2, k3, k4 = st.columns(4)
 
-        with k2:
+        with k1:
             if st.button(f"📊 PAGAMENTOS PREVISTOS\nR$ {tot_previsto:,.2f}", use_container_width=True):
                 st.session_state.filtro_kpi = "TODOS"
 
-        with k3:
+        with k2:
             if st.button(f"🟢 PAGAMENTOS LIQUIDADOS\nR$ {tot_realizado:,.2f}", use_container_width=True):
                 st.session_state.filtro_kpi = "REALIZADO"
 
-        with k4:
+        with k3:
             if st.button(f"🔴 PAGAMENTOS EM ABERTO\nR$ {tot_pendente:,.2f}", use_container_width=True):
                 st.session_state.filtro_kpi = "PENDENTE"
 
-        with k5:
-            delta_label = f"Entradas: R$ {tot_entradas_loja:,.2f}" if tot_entradas_loja > 0 else None
-            st.metric("Saldo Atual em Conta", f"R$ {geracao_caixa:,.2f}", delta=delta_label)
+        with k4:
+            delta_label = f"Entradas no Período: R$ {tot_entradas_loja:,.2f}" if tot_entradas_loja > 0 else None
+            st.metric("Saldo Real em Conta Bancária", f"R$ {saldo_atual_banco:,.2f}", delta=delta_label)
 
         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -312,20 +306,20 @@ if uploaded_file is not None:
                 
                 piv_ent = df_lojas_filtered.groupby('Dia')['Entradas'].sum()
                 piv_sai = df_lojas_filtered.groupby('Dia')['Saídas'].sum()
+                piv_sal = df_lojas_filtered.groupby('Dia')['Saldo_Banco'].last()
                 
                 row_e, row_s, row_liq, row_acum = {}, {}, {}, {}
-                saldo_run = saldo_inicial
                 
                 for d in dias_mes:
                     e = piv_ent.get(d, 0.0)
                     s = piv_sai.get(d, 0.0)
                     l = e - s
-                    saldo_run += l
+                    sal = piv_sal.get(d, 0.0)
                     
                     row_e[d] = e
                     row_s[d] = s
                     row_liq[d] = l
-                    row_acum[d] = saldo_run
+                    row_acum[d] = sal
                     
                 df_extrato_diario = pd.DataFrame([
                     {"Linha de Extrato": "1. (+) Total Entradas", **row_e},
