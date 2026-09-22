@@ -15,13 +15,10 @@ st.set_page_config(
 # Estilização CSS Personalizada (Identidade Borelli)
 st.markdown("""
 <style>
-    /* Fundo Global */
     .stApp {
         background-color: #0E1117;
         color: #FFFFFF;
     }
-    
-    /* Cabeçalho Principal */
     .main-title {
         font-size: 28px;
         font-weight: bold;
@@ -33,32 +30,6 @@ st.markdown("""
         color: #A0AAB0;
         margin-bottom: 20px;
     }
-
-    /* Cards de KPIs */
-    .kpi-card {
-        background-color: #161B22;
-        border: 1px solid #30363D;
-        border-radius: 8px;
-        padding: 18px;
-        text-align: left;
-    }
-    .kpi-label {
-        font-size: 13px;
-        color: #8B949E;
-        font-weight: 600;
-        text-transform: uppercase;
-    }
-    .kpi-value {
-        font-size: 24px;
-        font-weight: bold;
-        color: #FFFFFF;
-        margin-top: 5px;
-    }
-    .kpi-green { border-left: 5px solid #00875A; }
-    .kpi-red { border-left: 5px solid #FF4D4D; }
-    .kpi-blue { border-left: 5px solid #3182CE; }
-    
-    /* Card de Boas-Vindas */
     .welcome-card {
         background-color: #161B22;
         border: 1px solid #30363D;
@@ -123,7 +94,7 @@ def processar_arquivo_bruto(file):
 # CABEÇALHO DA PÁGINA
 # ---------------------------------------------------------
 st.markdown("<div class='main-title'>🍦 Gelateria Borelli - Gestão de Fluxo de Caixa</div>", unsafe_allow_html=True)
-st.markdown("<div class='main-subtitle'>Acompanhamento diário de liquidez e gestão estratégica financeira</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-subtitle'>Acompanhamento de liquidez, governança e detalhamento de títulos</div>", unsafe_allow_html=True)
 
 # BARRA LATERAL
 with st.sidebar:
@@ -133,6 +104,10 @@ with st.sidebar:
     st.header("📥 Carga de Dados")
     uploaded_file = st.file_uploader("Anexe o relatório (.xlsx)", type=["xlsx", "xls"])
 
+# Inicializar estado do filtro
+if 'filtro_kpi' not in st.session_state:
+    st.session_state.filtro_kpi = "PENDENTE"
+
 # ---------------------------------------------------------
 # RENDERIZAÇÃO
 # ---------------------------------------------------------
@@ -140,15 +115,14 @@ if uploaded_file is not None:
     try:
         df = processar_arquivo_bruto(uploaded_file)
         
-        # Obter intervalo de datas do arquivo
         min_date = df['Vencimento_dt'].min().date() if not df['Vencimento_dt'].isnull().all() else pd.to_datetime('today').date()
         max_date = df['Vencimento_dt'].max().date() if not df['Vencimento_dt'].isnull().all() else pd.to_datetime('today').date()
 
-        # FILTROS SUPERIORES (Estilo Borelli Dashboard)
+        # FILTROS SUPERIORES
         col_filtro1, col_filtro2 = st.columns([2, 1])
         
         with col_filtro1:
-            st.caption("🏢 **Filtrar por Unidade / Loja:**")
+            st.caption("🏢 **Unidade / Loja:**")
             lojas_disponiveis = list(df['Empresa'].dropna().unique())
             lojas_opcoes = ["Ver Todas as Lojas"] + lojas_disponiveis
             loja_selecionada = st.radio("", lojas_opcoes, horizontal=True)
@@ -163,7 +137,7 @@ if uploaded_file is not None:
                 format="DD/MM/YYYY"
             )
 
-        # Aplicação dos Filtros
+        # Filtragem de Dados
         if loja_selecionada == "Ver Todas as Lojas":
             df_filtered = df.copy()
         else:
@@ -178,48 +152,59 @@ if uploaded_file is not None:
 
         st.divider()
 
-        # KPIs REESTILIZADOS
+        # CÁLCULO DOS KPIS
         tot_previsto = df_filtered['Valor'].sum()
         tot_realizado = df_filtered[df_filtered['Status_Clean'] == 'REALIZADO']['Valor'].sum()
         tot_pendente = df_filtered[df_filtered['Status_Clean'] == 'PENDENTE']['Valor'].sum()
 
+        st.caption("👇 **Clique nos cartões abaixo para filtrar a lista detalhada de títulos:**")
+
+        # KPIS COMO BOTÕES INTERATIVOS
         k1, k2, k3, k4 = st.columns(4)
+        
         with k1:
-            st.markdown(f"""
-            <div class='kpi-card kpi-blue'>
-                <div class='kpi-label'>Saldo Inicial</div>
-                <div class='kpi-value'>R$ {saldo_inicial:,.2f}</div>
-            </div>
-            """, unsafe_allow_html=True)
+            st.metric("Saldo Inicial", f"R$ {saldo_inicial:,.2f}")
+
         with k2:
-            st.markdown(f"""
-            <div class='kpi-card kpi-green'>
-                <div class='kpi-label'>Total Previsto</div>
-                <div class='kpi-value'>R$ {tot_previsto:,.2f}</div>
-            </div>
-            """, unsafe_allow_html=True)
+            if st.button(f"📊 TOTAL PREVISTO\nR$ {tot_previsto:,.2f}", use_container_width=True):
+                st.session_state.filtro_kpi = "TODOS"
+
         with k3:
-            st.markdown(f"""
-            <div class='kpi-card kpi-red'>
-                <div class='kpi-label'>Total Liquidado</div>
-                <div class='kpi-value'>R$ {tot_realizado:,.2f}</div>
-            </div>
-            """, unsafe_allow_html=True)
+            if st.button(f"🟢 TOTAL LIQUIDADO\nR$ {tot_realizado:,.2f}", use_container_width=True):
+                st.session_state.filtro_kpi = "REALIZADO"
+
         with k4:
-            st.markdown(f"""
-            <div class='kpi-card kpi-green'>
-                <div class='kpi-label'>Total Pendente</div>
-                <div class='kpi-value'>R$ {tot_pendente:,.2f}</div>
-            </div>
-            """, unsafe_allow_html=True)
+            if st.button(f"🔴 TOTAL PENDENTE\nR$ {tot_pendente:,.2f}", use_container_width=True):
+                st.session_state.filtro_kpi = "PENDENTE"
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # ABAS DE RELATÓRIO
-        tab1, tab2, tab3, tab4 = st.tabs(["📋 DRE de Caixa", "📅 Fluxo Diário", "🏪 Por Loja", "🔍 Base Tratada"])
+        # APLICAÇÃO DO FILTRO DE CLIQUE NO KPI
+        if st.session_state.filtro_kpi == "REALIZADO":
+            df_titulos = df_filtered[df_filtered['Status_Clean'] == 'REALIZADO'].copy()
+            titulo_tabela = f"🟢 Exibindo {len(df_titulos)} Títulos LIQUIDADOS (R$ {tot_realizado:,.2f})"
+        elif st.session_state.filtro_kpi == "PENDENTE":
+            df_titulos = df_filtered[df_filtered['Status_Clean'] == 'PENDENTE'].copy()
+            titulo_tabela = f"🔴 Exibindo {len(df_titulos)} Títulos PENDENTES (R$ {tot_pendente:,.2f})"
+        else:
+            df_titulos = df_filtered.copy()
+            titulo_tabela = f"📊 Exibindo Todos os {len(df_titulos)} Títulos PREVISTOS (R$ {tot_previsto:,.2f})"
+
+        # TABELA DE INSPEÇÃO DIRETA
+        st.subheader(titulo_tabela)
+        st.dataframe(
+            df_titulos[['Número', 'Empresa', 'Cliente / Fornecedor', 'Vencimento', 'Valor', 'Plano de Contas', 'Categoria_CFO', 'Status_Clean']],
+            use_container_width=True,
+            hide_index=True
+        )
+
+        st.divider()
+
+        # ABAS COMPLEMENTARES
+        tab1, tab2, tab3 = st.tabs(["📋 DRE de Caixa", "📅 Fluxo Diário (Calendário)", "🏪 Comparativo Por Loja"])
         
         with tab1:
-            st.subheader("Demonstrativo de Saídas (Previsto vs. Realizado)")
+            st.subheader("Demonstrativo do Fluxo de Caixa (Previsto vs. Realizado)")
             cats = [
                 "1. FORNECEDORES / MERCADORIAS (CMV)",
                 "2. IMPOSTOS SOBRE VENDAS",
@@ -243,23 +228,21 @@ if uploaded_file is not None:
             st.dataframe(pd.DataFrame(dre_list), use_container_width=True, hide_index=True)
             
         with tab2:
-            st.subheader("Vencimentos Diários")
+            st.subheader("Matriz Diária de Vencimentos no Mês")
             pivot_daily = df_filtered.pivot_table(index='Categoria_CFO', columns='Dia', values='Valor', aggfunc='sum', fill_value=0)
             st.dataframe(pivot_daily.style.format("R$ {:,.2f}"), use_container_width=True)
             
-            st.subheader("Curva de Desembolso")
+            st.subheader("Curva Diária de Saídas")
             daily_chart = df_filtered.groupby('Dia')['Valor'].sum().reset_index()
             st.line_chart(daily_chart.set_index('Dia'))
             
         with tab3:
-            st.subheader("Comparativo entre Lojas")
+            st.subheader("Matriz Comparativa entre Lojas")
+            if loja_selecionada != "Ver Todas as Lojas":
+                st.info(f"Você está visualizando apenas a unidade **{loja_selecionada}**. Para comparar todas as unidades lado a lado, selecione **'Ver Todas as Lojas'** no filtro do topo.")
             pivot_store = df_filtered.pivot_table(index='Categoria_CFO', columns='Empresa', values='Valor', aggfunc='sum', fill_value=0)
             st.dataframe(pivot_store.style.format("R$ {:,.2f}"), use_container_width=True)
             st.bar_chart(pivot_store)
-            
-        with tab4:
-            st.subheader("Base de Dados Tratada")
-            st.dataframe(df_filtered[['Número', 'Empresa', 'Cliente / Fornecedor', 'Vencimento', 'Valor', 'Plano de Contas', 'Categoria_CFO', 'Status_Clean']], use_container_width=True, hide_index=True)
 
     except Exception as e:
         st.error(f"Erro ao processar o arquivo: {e}")
@@ -267,10 +250,10 @@ else:
     st.markdown("""
     <div class='welcome-card'>
         <h3>🍦 Painel de Fluxo de Caixa Executivo - Gelateria Borelli</h3>
-        <p>Aguardando carga do relatório para inicializar o processamento.</p>
+        <p>Aguardando carga do relatório do ERP para inicializar o processamento.</p>
         <ol>
             <li>Acesse o menu lateral à esquerda <b>(📥 Carga de Dados)</b>.</li>
-            <li>Faça o upload do arquivo <b>.xlsx</b> retirado do ERP.</li>
+            <li>Anexe o arquivo <b>.xlsx</b>.</li>
         </ol>
     </div>
     """, unsafe_allow_html=True)
