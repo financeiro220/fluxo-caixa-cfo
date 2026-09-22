@@ -50,7 +50,10 @@ def categorizar_plano_contas(plano):
     
     p = str(plano).upper().strip()
     
-    if any(k in p for k in ['CMV', 'DESCARTÁVEIS', 'DESCARTAVEIS', 'PRODUTO PARA REVENDA', 'LEITE', 'INSUMOS', 'MEC3', 'BOBINAS', 'FRUTAS', 'RIBERFOODS']):
+    # Exclusão explícita de Mútuo / Intercompany
+    if any(k in p for k in ['MÚTUO', 'MUTUO', 'TRANSFERÊNCIA', 'TRANSFERENCIA']):
+        return "7. MÚTUO / TRANSFERÊNCIA INTERCOMPANY (EXCLUÍDO)"
+    elif any(k in p for k in ['CMV', 'DESCARTÁVEIS', 'DESCARTAVEIS', 'PRODUTO PARA REVENDA', 'LEITE', 'INSUMOS', 'MEC3', 'BOBINAS', 'FRUTAS', 'RIBERFOODS']):
         return "1. FORNECEDORES / MERCADORIAS (CMV)"
     elif any(k in p for k in ['ICMS', 'IMPOSTO', 'FISCAL', 'DAS', 'TAXAS MUNICIPAIS', 'PIS', 'COFINS']):
         return "2. IMPOSTOS SOBRE VENDAS"
@@ -58,7 +61,7 @@ def categorizar_plano_contas(plano):
         return "3. DESPESAS DE OCUPAÇÃO"
     elif any(k in p for k in ['SALÁRIO', 'SALARIO', 'VALE', 'FOLHA', 'FGTS', 'FÉRIAS', 'FERIAS', 'DÉCIMO', 'DECIMO', 'AUXÍLIO', 'AUXILIO', 'PREMIAÇÕES', 'PREMIACOES', 'RESCISÃO', 'RESCISAO', 'DSR', 'ADICIONAL', 'PROVENTOS', 'FUNCIONÁRIOS', 'FUNCIONARIOS', 'UNIFORMES']):
         return "4. FOLHA DE PAGAMENTO & ENCARGOS"
-    elif any(k in p for k in ['EMPRÉSTIMO', 'EMPRESTIMO', 'MÚTUO', 'MUTUO', 'CAPITAL DE GIRO', 'SÓCIO', 'SOCIO', 'JUROS', 'MULTA', 'TARIFAS', 'RENEGOCIAÇÃO', 'RENEGOCIACAO', 'INVESTIMENTOS']):
+    elif any(k in p for k in ['EMPRÉSTIMO', 'EMPRESTIMO', 'CAPITAL DE GIRO', 'JUROS', 'MULTA', 'TARIFAS', 'RENEGOCIAÇÃO', 'RENEGOCIACAO', 'INVESTIMENTOS']):
         return "6. AMORTIZAÇÃO DE DÍVIDAS & CAPITAL"
     else:
         return "5. DESPESAS OPERACIONAIS & VENDAS"
@@ -121,12 +124,21 @@ def processar_arquivo_despesas(file):
         df = df_raw.copy()
         
     df = df[df['Tipo'].astype(str).str.contains('A Pagar|Pagar', case=False, na=False)].copy()
+    
+    # REGRA DE GOVERNAÇA: Desconsiderar títulos Cancelados ou Baixados
+    status_invalidos = ['cancelado', 'baixado']
+    df = df[~df['Status'].astype(str).str.lower().apply(lambda x: any(s in x for s in status_invalidos))].copy()
+    
     df['Valor'] = pd.to_numeric(df['Valor Bruto'], errors='coerce').fillna(0)
     df['Vencimento_dt'] = pd.to_datetime(df['Vencimento'], errors='coerce')
     df['Dia'] = df['Vencimento_dt'].dt.day
     df['Categoria_CFO'] = df['Plano de Contas'].apply(categorizar_plano_contas)
+    
+    # Excluir lançamentos de Mútuo / Intercompany
+    df = df[df['Categoria_CFO'] != "7. MÚTUO / TRANSFERÊNCIA INTERCOMPANY (EXCLUÍDO)"].copy()
+    
     df['Status_Clean'] = df['Status'].astype(str).apply(
-        lambda x: "REALIZADO" if any(s in str(x) for s in ['Liquidado', 'Baixado', 'Conciliado']) else "PENDENTE"
+        lambda x: "REALIZADO" if any(s in str(x) for s in ['Liquidado', 'Conciliado']) else "PENDENTE"
     )
     return df
 
@@ -136,7 +148,7 @@ def processar_arquivo_despesas(file):
 st.markdown("<div class='main-title'>🍦 Gelateria Borelli - Gestão de Fluxo de Caixa</div>", unsafe_allow_html=True)
 st.markdown("<div class='main-subtitle'>Acompanhamento de liquidez, governança e extrato acumulado diário</div>", unsafe_allow_html=True)
 
-# BARRA LATERAL (SEM SALDO INICIAL MANUAL)
+# BARRA LATERAL
 with st.sidebar:
     st.header("📥 Relatório ERP (Despesas)")
     uploaded_file = st.file_uploader("Anexe o Rateio de Títulos (.xlsx)", type=["xlsx", "xls"])
@@ -213,13 +225,12 @@ if uploaded_file is not None:
 
         st.divider()
 
-        # CÁLCULO DOS KPIS REAIS DE EXTRATO BANCO
+        # CÁLCULO DOS KPIS DE EXTRATO BANCO
         tot_entradas_loja = df_lojas_filtered['Entradas'].sum() if not df_lojas_filtered.empty else 0.0
         tot_previsto = df_desp_filtered['Valor'].sum()
         tot_realizado = df_desp_filtered[df_desp_filtered['Status_Clean'] == 'REALIZADO']['Valor'].sum()
         tot_pendente = df_desp_filtered[df_desp_filtered['Status_Clean'] == 'PENDENTE']['Valor'].sum()
         
-        # Saldo Final Real Extraído da Planilha no último dia do filtro
         if not df_lojas_filtered.empty:
             saldo_atual_banco = df_lojas_filtered.sort_values('Vencimento_dt')['Saldo_Banco'].iloc[-1]
         else:
