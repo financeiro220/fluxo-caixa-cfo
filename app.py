@@ -157,7 +157,7 @@ if uploaded_file is not None:
         tot_realizado = df_filtered[df_filtered['Status_Clean'] == 'REALIZADO']['Valor'].sum()
         tot_pendente = df_filtered[df_filtered['Status_Clean'] == 'PENDENTE']['Valor'].sum()
 
-        st.caption("👇 **Clique nos cartões abaixo para filtrar a lista detalhada de títulos:**")
+        st.caption("👇 **Clique nos cartões abaixo para selecionar o filtro de títulos na tabela inferior:**")
 
         # KPIS COMO BOTÕES INTERATIVOS
         k1, k2, k3, k4 = st.columns(4)
@@ -179,28 +179,7 @@ if uploaded_file is not None:
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # APLICAÇÃO DO FILTRO DE CLIQUE NO KPI
-        if st.session_state.filtro_kpi == "REALIZADO":
-            df_titulos = df_filtered[df_filtered['Status_Clean'] == 'REALIZADO'].copy()
-            titulo_tabela = f"🟢 Exibindo {len(df_titulos)} Títulos LIQUIDADOS (R$ {tot_realizado:,.2f})"
-        elif st.session_state.filtro_kpi == "PENDENTE":
-            df_titulos = df_filtered[df_filtered['Status_Clean'] == 'PENDENTE'].copy()
-            titulo_tabela = f"🔴 Exibindo {len(df_titulos)} Títulos PENDENTES (R$ {tot_pendente:,.2f})"
-        else:
-            df_titulos = df_filtered.copy()
-            titulo_tabela = f"📊 Exibindo Todos os {len(df_titulos)} Títulos PREVISTOS (R$ {tot_previsto:,.2f})"
-
-        # TABELA DE INSPEÇÃO DIRETA
-        st.subheader(titulo_tabela)
-        st.dataframe(
-            df_titulos[['Número', 'Empresa', 'Cliente / Fornecedor', 'Vencimento', 'Valor', 'Plano de Contas', 'Categoria_CFO', 'Status_Clean']],
-            use_container_width=True,
-            hide_index=True
-        )
-
-        st.divider()
-
-        # ABAS COMPLEMENTARES
+        # 1. VISÕES CONSOLIDADAS (DRE, DIÁRIO, LOJA) NO TOPO
         tab1, tab2, tab3 = st.tabs(["📋 DRE de Caixa", "📅 Fluxo Diário (Calendário)", "🏪 Comparativo Por Loja"])
         
         with tab1:
@@ -243,6 +222,26 @@ if uploaded_file is not None:
             pivot_store = df_filtered.pivot_table(index='Categoria_CFO', columns='Empresa', values='Valor', aggfunc='sum', fill_value=0)
             st.dataframe(pivot_store.style.format("R$ {:,.2f}"), use_container_width=True)
             st.bar_chart(pivot_store)
+
+        st.divider()
+
+        # 2. DETALHAMENTO DOS TÍTULOS POSICIONADO NO FINAL DA PÁGINA
+        if st.session_state.filtro_kpi == "REALIZADO":
+            df_titulos = df_filtered[df_filtered['Status_Clean'] == 'REALIZADO'].copy()
+            titulo_tabela = f"🟢 Exibindo {len(df_titulos)} Títulos LIQUIDADOS (R$ {tot_realizado:,.2f})"
+        elif st.session_state.filtro_kpi == "PENDENTE":
+            df_titulos = df_filtered[df_filtered['Status_Clean'] == 'PENDENTE'].copy()
+            titulo_tabela = f"🔴 Exibindo {len(df_titulos)} Títulos PENDENTES (R$ {tot_pendente:,.2f})"
+        else:
+            df_titulos = df_filtered.copy()
+            titulo_tabela = f"📊 Exibindo Todos os {len(df_titulos)} Títulos PREVISTOS (R$ {tot_previsto:,.2f})"
+
+        st.subheader(titulo_tabela)
+        st.dataframe(
+            df_titulos[['Número', 'Empresa', 'Cliente / Fornecedor', 'Vencimento', 'Valor', 'Plano de Contas', 'Categoria_CFO', 'Status_Clean']],
+            use_container_width=True,
+            hide_index=True
+        )
 
     except Exception as e:
         st.error(f"Erro ao processar o arquivo: {e}")
