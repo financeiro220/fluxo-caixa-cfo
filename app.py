@@ -42,26 +42,21 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# MOTOR DE CATEGORIZAÇÃO (CFO ENGINE: ENTRADAS & SAÍDAS)
+# FUNÇÕES DE PROCESSAMENTO E CONVERSÃO
 # ---------------------------------------------------------
+def converter_valor_ptbr(val):
+    if pd.isna(val): return 0.0
+    if isinstance(val, (int, float)): return float(val)
+    val_str = str(val).replace('.', '').replace(',', '.')
+    try:
+        return float(val_str)
+    except:
+        return 0.0
+
 def categorizar_plano_contas(row):
-    # Trata valores nulos/float convertendo para string limpa
-    tipo_val = row.get('Tipo', '')
-    tipo = str(tipo_val).strip().lower() if pd.notna(tipo_val) else ''
-    
     plano_val = row.get('Plano de Contas', '')
     plano = str(plano_val).upper().strip() if pd.notna(plano_val) else ''
     
-    # Se for título de RECEBER / ENTRADA
-    if any(k in tipo for k in ['receber', 'entrada', 'venda', 'receita']):
-        if any(k in plano for k in ['IFOOD', 'DELIVERY', 'APP']):
-            return "0. RECEITA - DELIVERY / IFOOD"
-        elif any(k in plano for k in ['CARTÃO', 'CARTAO', 'PIX', 'DINHEIRO', 'BALCÃO', 'BALCAO']):
-            return "0. RECEITA - VENDAS LOJA / BALCÃO"
-        else:
-            return "0. RECEITA - OUTRAS ENTRADAS"
-            
-    # Se for título de PAGAR / SAÍDA
     if any(k in plano for k in ['CMV', 'DESCARTÁVEIS', 'DESCARTAVEIS', 'PRODUTO PARA REVENDA', 'LEITE', 'INSUMOS', 'MEC3', 'BOBINAS', 'FRUTAS', 'RIBERFOODS']):
         return "1. FORNECEDORES / MERCADORIAS (CMV)"
     elif any(k in plano for k in ['ICMS', 'IMPOSTO', 'FISCAL', 'DAS', 'TAXAS MUNICIPAIS', 'PIS', 'COFINS']):
@@ -76,7 +71,29 @@ def categorizar_plano_contas(row):
         return "5. DESPESAS OPERACIONAIS & VENDAS"
 
 @st.cache_data(ttl=3600)
-def processar_arquivo_bruto(file):
+def processar_relatorio_receitas(file, nome_loja):
+    df_raw = pd.read_excel(file)
+    df_raw.columns = [str(c).strip().upper() for c in df_raw.columns]
+    
+    col_total = 'TOTAL COM PRAZO' if 'TOTAL COM PRAZO' in df_raw.columns else 'TOTAL SEM PRAZO'
+    if col_total not in df_raw.columns:
+        col_total = [c for c in df_raw.columns if 'TOTAL' in c][0]
+        
+    df_raw['Valor'] = df_raw[col_total].apply(converter_valor_ptbr)
+    df_raw['Vencimento_dt'] = pd.to_datetime(df_raw['DATA'], dayfirst=True, errors='coerce')
+    df_raw['Dia'] = df_raw['Vencimento_dt'].dt.day
+    df_raw['Empresa'] = nome_loja
+    df_raw['Tipo_Fluxo'] = 'ENTRADA'
+    df_raw['Categoria_CFO'] = '0. RECEITA DE VENDAS'
+    df_raw['Status_Clean'] = 'REALIZADO'
+    df_raw['Cliente / Fornecedor'] = 'CLIENTES BALCÃO / DELIVERY'
+    df_raw['Plano de Contas'] = 'VENDAS FRANCHISING'
+    df_raw['Número'] = 'VENDAS-DIA'
+    
+    return df_raw[['Número', 'Empresa', 'Cliente / Fornecedor', 'Vencimento_dt', 'Dia', 'Valor', 'Tipo_Fluxo', 'Plano de Contas', 'Categoria_CFO', 'Status_Clean']]
+
+@st.cache_data(ttl=3600)
+def processar_relatorio_despesas(file):
     df_raw = pd.read_excel(file)
     
     header_idx = None
@@ -96,40 +113,61 @@ def processar_arquivo_bruto(file):
     df['Vencimento_dt'] = pd.to_datetime(df['Vencimento'], errors='coerce')
     df['Dia'] = df['Vencimento_dt'].dt.day
     df['Categoria_CFO'] = df.apply(categorizar_plano_contas, axis=1)
-    
-    # Identificar fluxo seguro contra valores nulos em 'Tipo'
-    df['Tipo_Fluxo'] = df['Tipo'].astype(str).apply(
-        lambda x: "ENTRADA" if any(s in str(x).lower() for s in ['receber', 'entrada', 'receita']) else "SAÍDA"
-    )
-    
+    df['Tipo_Fluxo'] = 'SAÍDA'
     df['Status_Clean'] = df['Status'].astype(str).apply(
         lambda x: "REALIZADO" if any(s in str(x) for s in ['Liquidado', 'Baixado', 'Conciliado']) else "PENDENTE"
     )
-    return df
+    return df[['Número', 'Empresa', 'Cliente / Fornecedor', 'Vencimento_dt', 'Dia', 'Valor', 'Tipo_Fluxo', 'Plano de Contas', 'Categoria_CFO', 'Status_Clean']]
 
 # ---------------------------------------------------------
 # CABEÇALHO DA PÁGINA
 # ---------------------------------------------------------
 st.markdown("<div class='main-title'>🍦 Gelateria Borelli - Gestão Integrada de Fluxo de Caixa</div>", unsafe_allow_html=True)
-st.markdown("<div class='main-subtitle'>Visão Consolidada de Entradas (Receitas), Saídas (Despesas) e Liquidez Real</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-subtitle'>Visão Consolidada de Entradas (Faturamento Lojas) e Saídas (Relatório ERP)</div>", unsafe_allow_html=True)
 
 # BARRA LATERAL
 with st.sidebar:
     st.header("⚙️ Parâmetros")
     saldo_inicial = st.number_input("Saldo Inicial em Conta (R$)", value=36945.97, step=1000.0, format="%.2f")
     st.divider()
-    st.header("📥 Carga de Dados")
-    uploaded_file = st.file_uploader("Anexe o relatório completo (.xlsx)", type=["xlsx", "xls"])
+    
+    st.header("📥 Relatório ERP (Despesas)")
+    file_despesas = st.file_uploader("Anexe o Rateio de Títulos (.xlsx)", type=["xlsx", "xls"], key="despesas")
+    
+    st.divider()
+    st.header("🍦 Faturamento por Unidade")
+    file_pantanal = st.file_uploader("Vendas Pantanal (.xlsx)", type=["xlsx", "xls"], key="pantanal")
+    file_goiabeiras = st.file_uploader("Vendas Goiabeiras (.xlsx)", type=["xlsx", "xls"], key="goiabeiras")
+    file_estacao = st.file_uploader("Vendas Estação (.xlsx)", type=["xlsx", "xls"], key="estacao")
 
 if 'filtro_kpi' not in st.session_state:
     st.session_state.filtro_kpi = "TODOS"
 
 # ---------------------------------------------------------
-# RENDERIZAÇÃO
+# RENDERIZAÇÃO E CONSOLIDAÇÃO
 # ---------------------------------------------------------
-if uploaded_file is not None:
+if file_despesas is not None:
     try:
-        df = processar_arquivo_bruto(uploaded_file)
+        dfs_consolidados = []
+        
+        # 1. Processar Despesas
+        df_desp = processar_relatorio_despesas(file_despesas)
+        dfs_consolidados.append(df_desp)
+        
+        # 2. Processar Receitas de cada Loja
+        if file_pantanal is not None:
+            df_p = processar_relatorio_receitas(file_pantanal, "4- PANTANAL")
+            dfs_consolidados.append(df_p)
+            
+        if file_goiabeiras is not None:
+            df_g = processar_relatorio_receitas(file_goiabeiras, "8 - GOIABEIRAS")
+            dfs_consolidados.append(df_g)
+            
+        if file_estacao is not None:
+            df_e = processar_relatorio_receitas(file_estacao, "5- ESTAÇÃO")
+            dfs_consolidados.append(df_e)
+            
+        df = pd.concat(dfs_consolidados, ignore_index=True)
         
         min_date = df['Vencimento_dt'].min().date() if not df['Vencimento_dt'].isnull().all() else pd.to_datetime('today').date()
         max_date = df['Vencimento_dt'].max().date() if not df['Vencimento_dt'].isnull().all() else pd.to_datetime('today').date()
@@ -191,8 +229,7 @@ if uploaded_file is not None:
                 st.session_state.filtro_kpi = "SAÍDA"
 
         with k4:
-            color_res = "normal" if resultado_liquido >= 0 else "inverse"
-            st.metric("Geração de Caixa", f"R$ {resultado_liquido:,.2f}", delta=f"{resultado_liquido:,.2f}")
+            st.metric("Geração de Caixa", f"R$ {resultado_liquido:,.2f}")
 
         with k5:
             st.metric("Saldo Final Projetado", f"R$ {saldo_final:,.2f}")
@@ -206,7 +243,7 @@ if uploaded_file is not None:
             st.subheader("Demonstrativo do Fluxo de Caixa Completo (Entradas vs. Saídas)")
             
             dre_data = []
-            dre_data.append({"Item": "1. RECEITAS OPERACIONAIS (ENTRADAS)", "Valor (R$)": f"R$ {tot_receitas:,.2f}", "% Vendas": "100.0%"})
+            dre_data.append({"Item": "1. RECEITAS OPERACIONAIS (VENDAS)", "Valor (R$)": f"R$ {tot_receitas:,.2f}", "% Vendas": "100.0%"})
             
             cats_saida = [
                 "1. FORNECEDORES / MERCADORIAS (CMV)",
@@ -244,7 +281,7 @@ if uploaded_file is not None:
         # 2. INSPEÇÃO DE TÍTULOS ABAIXO DOS RELATÓRIOS
         if st.session_state.filtro_kpi == "ENTRADA":
             df_titulos = df_filtered[df_filtered['Tipo_Fluxo'] == 'ENTRADA'].copy()
-            titulo_tabela = f"🟢 Exibindo {len(df_titulos)} Títulos de RECEITA / ENTRADA (R$ {tot_receitas:,.2f})"
+            titulo_tabela = f"🟢 Exibindo {len(df_titulos)} Lançamentos de RECEITA / FATURAMENTO (R$ {tot_receitas:,.2f})"
         elif st.session_state.filtro_kpi == "SAÍDA":
             df_titulos = df_filtered[df_filtered['Tipo_Fluxo'] == 'SAÍDA'].copy()
             titulo_tabela = f"🔴 Exibindo {len(df_titulos)} Títulos de DESPESA / SAÍDA (R$ {tot_despesas:,.2f})"
@@ -253,22 +290,26 @@ if uploaded_file is not None:
             titulo_tabela = f"📊 Exibindo Todos os {len(df_titulos)} Lançamentos de Caixa"
 
         st.subheader(titulo_tabela)
+        
+        df_display = df_titulos.copy()
+        df_display['Vencimento_dt'] = df_display['Vencimento_dt'].dt.strftime('%d/%m/%Y')
+        
         st.dataframe(
-            df_titulos[['Número', 'Empresa', 'Cliente / Fornecedor', 'Vencimento', 'Valor', 'Tipo_Fluxo', 'Plano de Contas', 'Categoria_CFO', 'Status_Clean']],
+            df_display[['Número', 'Empresa', 'Cliente / Fornecedor', 'Vencimento_dt', 'Valor', 'Tipo_Fluxo', 'Plano de Contas', 'Categoria_CFO', 'Status_Clean']],
             use_container_width=True,
             hide_index=True
         )
 
     except Exception as e:
-        st.error(f"Erro ao processar o arquivo: {e}")
+        st.error(f"Erro ao processar os arquivos: {e}")
 else:
     st.markdown("""
     <div class='welcome-card'>
         <h3>🍦 Painel de Fluxo de Caixa Executivo - Gelateria Borelli</h3>
-        <p>Aguardando carga do relatório financeiro do ERP (Contas a Pagar e Contas a Receber).</p>
+        <p>Aguardando carga dos relatórios para consolidar o DRE e a Gestão de Caixa.</p>
         <ol>
-            <li>Acesse o menu lateral à esquerda <b>(📥 Carga de Dados)</b>.</li>
-            <li>Anexe o arquivo <b>.xlsx</b>.</li>
+            <li>Anexe o arquivo do ERP <b>(Rateio de Títulos / Despesas)</b>.</li>
+            <li>Anexe os relatórios diários de faturamento das lojas <b>(Pantanal, Goiabeiras, Estação)</b>.</li>
         </ol>
     </div>
     """, unsafe_allow_html=True)
