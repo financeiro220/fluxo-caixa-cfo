@@ -42,64 +42,35 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# FUNÇÕES DE PROCESSAMENTO E CONVERSÃO
+# MOTOR DE CATEGORIZAÇÃO (CFO ENGINE)
 # ---------------------------------------------------------
-def converter_valor_ptbr(val):
-    if pd.isna(val): return 0.0
-    if isinstance(val, (int, float)): return float(val)
-    val_str = str(val).replace('.', '').replace(',', '.')
-    try:
-        return float(val_str)
-    except:
-        return 0.0
-
-def categorizar_plano_contas(row):
-    plano_val = row.get('Plano de Contas', '')
-    plano = str(plano_val).upper().strip() if pd.notna(plano_val) else ''
+def categorizar_plano_contas(plano):
+    if pd.isna(plano):
+        return "5. DESPESAS OPERACIONAIS & VENDAS"
     
-    if any(k in plano for k in ['CMV', 'DESCARTÁVEIS', 'DESCARTAVEIS', 'PRODUTO PARA REVENDA', 'LEITE', 'INSUMOS', 'MEC3', 'BOBINAS', 'FRUTAS', 'RIBERFOODS']):
+    p = str(plano).upper().strip()
+    
+    if any(k in p for k in ['CMV', 'DESCARTÁVEIS', 'DESCARTAVEIS', 'PRODUTO PARA REVENDA', 'LEITE', 'INSUMOS', 'MEC3', 'BOBINAS', 'FRUTAS', 'RIBERFOODS']):
         return "1. FORNECEDORES / MERCADORIAS (CMV)"
-    elif any(k in plano for k in ['ICMS', 'IMPOSTO', 'FISCAL', 'DAS', 'TAXAS MUNICIPAIS', 'PIS', 'COFINS']):
+    elif any(k in p for k in ['ICMS', 'IMPOSTO', 'FISCAL', 'DAS', 'TAXAS MUNICIPAIS', 'PIS', 'COFINS']):
         return "2. IMPOSTOS SOBRE VENDAS"
-    elif any(k in plano for k in ['ALUGUEL', 'CONDOMÍNIO', 'CONDOMINIO', 'ENERGIA', 'ÁGUA', 'AGUA', 'IPTU', 'SEGURO PREDIAL', 'FUNDO DE PROMOÇÃO', 'LIMPEZA', 'FACHADA']):
+    elif any(k in p for k in ['ALUGUEL', 'CONDOMÍNIO', 'CONDOMINIO', 'ENERGIA', 'ÁGUA', 'AGUA', 'IPTU', 'SEGURO PREDIAL', 'FUNDO DE PROMOÇÃO', 'LIMPEZA', 'FACHADA']):
         return "3. DESPESAS DE OCUPAÇÃO"
-    elif any(k in plano for k in ['SALÁRIO', 'SALARIO', 'VALE', 'FOLHA', 'FGTS', 'FÉRIAS', 'FERIAS', 'DÉCIMO', 'DECIMO', 'AUXÍLIO', 'AUXILIO', 'PREMIAÇÕES', 'PREMIACOES', 'RESCISÃO', 'RESCISAO', 'DSR', 'ADICIONAL', 'PROVENTOS', 'FUNCIONÁRIOS', 'FUNCIONARIOS', 'UNIFORMES']):
+    elif any(k in p for k in ['SALÁRIO', 'SALARIO', 'VALE', 'FOLHA', 'FGTS', 'FÉRIAS', 'FERIAS', 'DÉCIMO', 'DECIMO', 'AUXÍLIO', 'AUXILIO', 'PREMIAÇÕES', 'PREMIACOES', 'RESCISÃO', 'RESCISAO', 'DSR', 'ADICIONAL', 'PROVENTOS', 'FUNCIONÁRIOS', 'FUNCIONARIOS', 'UNIFORMES']):
         return "4. FOLHA DE PAGAMENTO & ENCARGOS"
-    elif any(k in plano for k in ['EMPRÉSTIMO', 'EMPRESTIMO', 'MÚTUO', 'MUTUO', 'CAPITAL DE GIRO', 'SÓCIO', 'SOCIO', 'JUROS', 'MULTA', 'TARIFAS', 'RENEGOCIAÇÃO', 'RENEGOCIACAO', 'INVESTIMENTOS']):
+    elif any(k in p for k in ['EMPRÉSTIMO', 'EMPRESTIMO', 'MÚTUO', 'MUTUO', 'CAPITAL DE GIRO', 'SÓCIO', 'SOCIO', 'JUROS', 'MULTA', 'TARIFAS', 'RENEGOCIAÇÃO', 'RENEGOCIACAO', 'INVESTIMENTOS']):
         return "6. AMORTIZAÇÃO DE DÍVIDAS & CAPITAL"
     else:
         return "5. DESPESAS OPERACIONAIS & VENDAS"
 
 @st.cache_data(ttl=3600)
-def processar_relatorio_receitas(file, nome_loja):
-    df_raw = pd.read_excel(file)
-    df_raw.columns = [str(c).strip().upper() for c in df_raw.columns]
-    
-    col_total = 'TOTAL COM PRAZO' if 'TOTAL COM PRAZO' in df_raw.columns else 'TOTAL SEM PRAZO'
-    if col_total not in df_raw.columns:
-        col_total = [c for c in df_raw.columns if 'TOTAL' in c][0]
-        
-    df_raw['Valor'] = df_raw[col_total].apply(converter_valor_ptbr)
-    df_raw['Vencimento_dt'] = pd.to_datetime(df_raw['DATA'], dayfirst=True, errors='coerce')
-    df_raw['Dia'] = df_raw['Vencimento_dt'].dt.day
-    df_raw['Empresa'] = nome_loja
-    df_raw['Tipo_Fluxo'] = 'ENTRADA'
-    df_raw['Categoria_CFO'] = '0. RECEITA DE VENDAS'
-    df_raw['Status_Clean'] = 'REALIZADO'
-    df_raw['Cliente / Fornecedor'] = 'CLIENTES BALCÃO / DELIVERY'
-    df_raw['Plano de Contas'] = 'VENDAS FRANCHISING'
-    df_raw['Número'] = 'VENDAS-DIA'
-    
-    return df_raw[['Número', 'Empresa', 'Cliente / Fornecedor', 'Vencimento_dt', 'Dia', 'Valor', 'Tipo_Fluxo', 'Plano de Contas', 'Categoria_CFO', 'Status_Clean']]
-
-@st.cache_data(ttl=3600)
-def processar_relatorio_despesas(file):
+def processar_arquivo_bruto(file):
     df_raw = pd.read_excel(file)
     
     header_idx = None
     for idx, row in df_raw.iterrows():
         row_str = " ".join(row.dropna().astype(str))
-        if "Vencimento" in row_str and "Valor Bruto" in row_str:
+        if "Tipo" in row_str and "Vencimento" in row_str and "Valor Bruto" in row_str:
             header_idx = idx
             break
             
@@ -109,65 +80,39 @@ def processar_relatorio_despesas(file):
     else:
         df = df_raw.copy()
         
+    df = df[df['Tipo'].astype(str).str.contains('A Pagar|Pagar', case=False, na=False)].copy()
     df['Valor'] = pd.to_numeric(df['Valor Bruto'], errors='coerce').fillna(0)
     df['Vencimento_dt'] = pd.to_datetime(df['Vencimento'], errors='coerce')
     df['Dia'] = df['Vencimento_dt'].dt.day
-    df['Categoria_CFO'] = df.apply(categorizar_plano_contas, axis=1)
-    df['Tipo_Fluxo'] = 'SAÍDA'
+    df['Categoria_CFO'] = df['Plano de Contas'].apply(categorizar_plano_contas)
     df['Status_Clean'] = df['Status'].astype(str).apply(
         lambda x: "REALIZADO" if any(s in str(x) for s in ['Liquidado', 'Baixado', 'Conciliado']) else "PENDENTE"
     )
-    return df[['Número', 'Empresa', 'Cliente / Fornecedor', 'Vencimento_dt', 'Dia', 'Valor', 'Tipo_Fluxo', 'Plano de Contas', 'Categoria_CFO', 'Status_Clean']]
+    return df
 
 # ---------------------------------------------------------
 # CABEÇALHO DA PÁGINA
 # ---------------------------------------------------------
-st.markdown("<div class='main-title'>🍦 Gelateria Borelli - Gestão Integrada de Fluxo de Caixa</div>", unsafe_allow_html=True)
-st.markdown("<div class='main-subtitle'>Visão Consolidada de Entradas (Faturamento Lojas) e Saídas (Relatório ERP)</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-title'>🍦 Gelateria Borelli - Gestão de Fluxo de Caixa</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-subtitle'>Acompanhamento de liquidez, governança e DRE Previsto vs. Realizado</div>", unsafe_allow_html=True)
 
 # BARRA LATERAL
 with st.sidebar:
     st.header("⚙️ Parâmetros")
     saldo_inicial = st.number_input("Saldo Inicial em Conta (R$)", value=36945.97, step=1000.0, format="%.2f")
     st.divider()
-    
-    st.header("📥 Relatório ERP (Despesas)")
-    file_despesas = st.file_uploader("Anexe o Rateio de Títulos (.xlsx)", type=["xlsx", "xls"], key="despesas")
-    
-    st.divider()
-    st.header("🍦 Faturamento por Unidade")
-    file_pantanal = st.file_uploader("Vendas Pantanal (.xlsx)", type=["xlsx", "xls"], key="pantanal")
-    file_goiabeiras = st.file_uploader("Vendas Goiabeiras (.xlsx)", type=["xlsx", "xls"], key="goiabeiras")
-    file_estacao = st.file_uploader("Vendas Estação (.xlsx)", type=["xlsx", "xls"], key="estacao")
+    st.header("📥 Carga de Dados")
+    uploaded_file = st.file_uploader("Anexe o relatório (.xlsx)", type=["xlsx", "xls"])
 
 if 'filtro_kpi' not in st.session_state:
-    st.session_state.filtro_kpi = "TODOS"
+    st.session_state.filtro_kpi = "PENDENTE"
 
 # ---------------------------------------------------------
-# RENDERIZAÇÃO E CONSOLIDAÇÃO
+# RENDERIZAÇÃO
 # ---------------------------------------------------------
-if file_despesas is not None:
+if uploaded_file is not None:
     try:
-        dfs_consolidados = []
-        
-        # 1. Processar Despesas
-        df_desp = processar_relatorio_despesas(file_despesas)
-        dfs_consolidados.append(df_desp)
-        
-        # 2. Processar Receitas de cada Loja
-        if file_pantanal is not None:
-            df_p = processar_relatorio_receitas(file_pantanal, "4- PANTANAL")
-            dfs_consolidados.append(df_p)
-            
-        if file_goiabeiras is not None:
-            df_g = processar_relatorio_receitas(file_goiabeiras, "8 - GOIABEIRAS")
-            dfs_consolidados.append(df_g)
-            
-        if file_estacao is not None:
-            df_e = processar_relatorio_receitas(file_estacao, "5- ESTAÇÃO")
-            dfs_consolidados.append(df_e)
-            
-        df = pd.concat(dfs_consolidados, ignore_index=True)
+        df = processar_arquivo_bruto(uploaded_file)
         
         min_date = df['Vencimento_dt'].min().date() if not df['Vencimento_dt'].isnull().all() else pd.to_datetime('today').date()
         max_date = df['Vencimento_dt'].max().date() if not df['Vencimento_dt'].isnull().all() else pd.to_datetime('today').date()
@@ -206,46 +151,43 @@ if file_despesas is not None:
 
         st.divider()
 
-        # CÁLCULO DOS KPIS DE FLUXO GLOBAL
-        tot_receitas = df_filtered[df_filtered['Tipo_Fluxo'] == 'ENTRADA']['Valor'].sum()
-        tot_despesas = df_filtered[df_filtered['Tipo_Fluxo'] == 'SAÍDA']['Valor'].sum()
-        resultado_liquido = tot_receitas - tot_despesas
-        saldo_final = saldo_inicial + resultado_liquido
+        # CÁLCULO DOS KPIS ORIGINAIS
+        tot_previsto = df_filtered['Valor'].sum()
+        tot_realizado = df_filtered[df_filtered['Status_Clean'] == 'REALIZADO']['Valor'].sum()
+        tot_pendente = df_filtered[df_filtered['Status_Clean'] == 'PENDENTE']['Valor'].sum()
+        geracao_caixa = saldo_inicial - tot_realizado
 
-        st.caption("👇 **Clique nos cartões de KPI abaixo para filtrar os títulos:**")
+        st.caption("👇 **Clique nos botões para filtrar os títulos na tabela inferior:**")
 
-        # PAINEL SUPERIOR DE KPIS
+        # KPIS COMO BOTÕES INTERATIVOS
         k1, k2, k3, k4, k5 = st.columns(5)
         
         with k1:
             st.metric("Saldo Inicial", f"R$ {saldo_inicial:,.2f}")
 
         with k2:
-            if st.button(f"🟢 RECEITAS (ENTRADAS)\nR$ {tot_receitas:,.2f}", use_container_width=True):
-                st.session_state.filtro_kpi = "ENTRADA"
+            if st.button(f"📊 PAGAMENTOS PREVISTOS\nR$ {tot_previsto:,.2f}", use_container_width=True):
+                st.session_state.filtro_kpi = "TODOS"
 
         with k3:
-            if st.button(f"🔴 DESPESAS (SAÍDAS)\nR$ {tot_despesas:,.2f}", use_container_width=True):
-                st.session_state.filtro_kpi = "SAÍDA"
+            if st.button(f"🟢 PAGAMENTOS LIQUIDADOS\nR$ {tot_realizado:,.2f}", use_container_width=True):
+                st.session_state.filtro_kpi = "REALIZADO"
 
         with k4:
-            st.metric("Geração de Caixa", f"R$ {resultado_liquido:,.2f}")
+            if st.button(f"🔴 PAGAMENTOS EM ABERTO\nR$ {tot_pendente:,.2f}", use_container_width=True):
+                st.session_state.filtro_kpi = "PENDENTE"
 
         with k5:
-            st.metric("Saldo Final Projetado", f"R$ {saldo_final:,.2f}")
+            st.metric("Geração de Caixa", f"R$ {geracao_caixa:,.2f}")
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # 1. ABAS EXECUTIVAS CONSOLIDADAS
-        tab1, tab2, tab3 = st.tabs(["📋 DRE de Caixa Integrada", "📅 Fluxo Diário de Caixa", "🏪 Comparativo Por Loja"])
+        # 1. VISÕES CONSOLIDADAS (DRE, DIÁRIO, LOJA)
+        tab1, tab2, tab3 = st.tabs(["📋 DRE de Caixa", "📅 Fluxo Diário (Calendário)", "🏪 Comparativo Por Loja"])
         
         with tab1:
-            st.subheader("Demonstrativo do Fluxo de Caixa Completo (Entradas vs. Saídas)")
-            
-            dre_data = []
-            dre_data.append({"Item": "1. RECEITAS OPERACIONAIS (VENDAS)", "Valor (R$)": f"R$ {tot_receitas:,.2f}", "% Vendas": "100.0%"})
-            
-            cats_saida = [
+            st.subheader("Demonstrativo do Fluxo de Caixa (Previsto vs. Realizado)")
+            cats = [
                 "1. FORNECEDORES / MERCADORIAS (CMV)",
                 "2. IMPOSTOS SOBRE VENDAS",
                 "3. DESPESAS DE OCUPAÇÃO",
@@ -253,63 +195,66 @@ if file_despesas is not None:
                 "5. DESPESAS OPERACIONAIS & VENDAS",
                 "6. AMORTIZAÇÃO DE DÍVIDAS & CAPITAL"
             ]
-            
-            for c in cats_saida:
-                val = df_filtered[df_filtered['Categoria_CFO'] == c]['Valor'].sum()
-                pct = (val / tot_receitas * 100) if tot_receitas > 0 else 0
-                dre_data.append({"Item": f"   (-) {c}", "Valor (R$)": f"R$ {val:,.2f}", "% Vendas": f"{pct:.1f}%"})
-                
-            dre_data.append({"Item": "(=) RESULTADO LÍQUIDO OPERACIONAL", "Valor (R$)": f"R$ {resultado_liquido:,.2f}", "% Vendas": f"{(resultado_liquido/tot_receitas*100) if tot_receitas>0 else 0:.1f}%"})
-            
-            st.dataframe(pd.DataFrame(dre_data), use_container_width=True, hide_index=True)
+            dre_list = []
+            for c in cats:
+                p = df_filtered[df_filtered['Categoria_CFO'] == c]['Valor'].sum()
+                r = df_filtered[(df_filtered['Categoria_CFO'] == c) & (df_filtered['Status_Clean'] == 'REALIZADO')]['Valor'].sum()
+                v = r - p
+                dre_list.append({
+                    "Categoria CFO": c,
+                    "Previsto (R$)": f"R$ {p:,.2f}",
+                    "Realizado (R$)": f"R$ {r:,.2f}",
+                    "Variação (R$)": f"R$ {v:,.2f}",
+                    "% do Total": f"{(p/tot_previsto*100) if tot_previsto>0 else 0:.1f}%"
+                })
+            st.dataframe(pd.DataFrame(dre_list), use_container_width=True, hide_index=True)
             
         with tab2:
-            st.subheader("Evolução Diária de Caixa (Receitas x Despesas)")
-            daily_pivot = df_filtered.pivot_table(index='Dia', columns='Tipo_Fluxo', values='Valor', aggfunc='sum', fill_value=0)
-            st.line_chart(daily_pivot)
+            st.subheader("Matriz Diária de Vencimentos no Mês")
+            pivot_daily = df_filtered.pivot_table(index='Categoria_CFO', columns='Dia', values='Valor', aggfunc='sum', fill_value=0)
+            st.dataframe(pivot_daily.style.format("R$ {:,.2f}"), use_container_width=True)
             
         with tab3:
-            st.subheader("Geração de Caixa Por Unidade")
+            st.subheader("Matriz Comparativa entre Lojas")
             if loja_selecionada != "Ver Todas as Lojas":
-                st.info(f"Exibindo apenas a unidade **{loja_selecionada}**. Para comparar todas as lojas lado a lado, selecione **'Ver Todas as Lojas'** no topo.")
-            pivot_store = df_filtered.pivot_table(index='Tipo_Fluxo', columns='Empresa', values='Valor', aggfunc='sum', fill_value=0)
+                st.info(f"Você está visualizando apenas a unidade **{loja_selecionada}**. Para comparar todas as unidades lado a lado, selecione **'Ver Todas as Lojas'** no filtro do topo.")
+            pivot_store = df_filtered.pivot_table(index='Categoria_CFO', columns='Empresa', values='Valor', aggfunc='sum', fill_value=0)
             st.dataframe(pivot_store.style.format("R$ {:,.2f}"), use_container_width=True)
-            st.bar_chart(pivot_store)
 
         st.divider()
 
-        # 2. INSPEÇÃO DE TÍTULOS ABAIXO DOS RELATÓRIOS
-        if st.session_state.filtro_kpi == "ENTRADA":
-            df_titulos = df_filtered[df_filtered['Tipo_Fluxo'] == 'ENTRADA'].copy()
-            titulo_tabela = f"🟢 Exibindo {len(df_titulos)} Lançamentos de RECEITA / FATURAMENTO (R$ {tot_receitas:,.2f})"
-        elif st.session_state.filtro_kpi == "SAÍDA":
-            df_titulos = df_filtered[df_filtered['Tipo_Fluxo'] == 'SAÍDA'].copy()
-            titulo_tabela = f"🔴 Exibindo {len(df_titulos)} Títulos de DESPESA / SAÍDA (R$ {tot_despesas:,.2f})"
+        # 2. DETALHAMENTO DOS TÍTULOS POSICIONADO NO FINAL DA PÁGINA
+        if st.session_state.filtro_kpi == "REALIZADO":
+            df_titulos = df_filtered[df_filtered['Status_Clean'] == 'REALIZADO'].copy()
+            titulo_tabela = f"🟢 Exibindo {len(df_titulos)} Títulos LIQUIDADOS (R$ {tot_realizado:,.2f})"
+        elif st.session_state.filtro_kpi == "PENDENTE":
+            df_titulos = df_filtered[df_filtered['Status_Clean'] == 'PENDENTE'].copy()
+            titulo_tabela = f"🔴 Exibindo {len(df_titulos)} Títulos PENDENTES (R$ {tot_pendente:,.2f})"
         else:
             df_titulos = df_filtered.copy()
-            titulo_tabela = f"📊 Exibindo Todos os {len(df_titulos)} Lançamentos de Caixa"
+            titulo_tabela = f"📊 Exibindo Todos os {len(df_titulos)} Títulos PREVISTOS (R$ {tot_previsto:,.2f})"
 
         st.subheader(titulo_tabela)
         
         df_display = df_titulos.copy()
-        df_display['Vencimento_dt'] = df_display['Vencimento_dt'].dt.strftime('%d/%m/%Y')
+        df_display['Vencimento'] = df_display['Vencimento_dt'].dt.strftime('%d/%m/%Y')
         
         st.dataframe(
-            df_display[['Número', 'Empresa', 'Cliente / Fornecedor', 'Vencimento_dt', 'Valor', 'Tipo_Fluxo', 'Plano de Contas', 'Categoria_CFO', 'Status_Clean']],
+            df_display[['Número', 'Empresa', 'Cliente / Fornecedor', 'Vencimento', 'Valor', 'Plano de Contas', 'Categoria_CFO', 'Status_Clean']],
             use_container_width=True,
             hide_index=True
         )
 
     except Exception as e:
-        st.error(f"Erro ao processar os arquivos: {e}")
+        st.error(f"Erro ao processar o arquivo: {e}")
 else:
     st.markdown("""
     <div class='welcome-card'>
         <h3>🍦 Painel de Fluxo de Caixa Executivo - Gelateria Borelli</h3>
-        <p>Aguardando carga dos relatórios para consolidar o DRE e a Gestão de Caixa.</p>
+        <p>Aguardando carga do relatório do ERP para inicializar o processamento.</p>
         <ol>
-            <li>Anexe o arquivo do ERP <b>(Rateio de Títulos / Despesas)</b>.</li>
-            <li>Anexe os relatórios diários de faturamento das lojas <b>(Pantanal, Goiabeiras, Estação)</b>.</li>
+            <li>Acesse o menu lateral à esquerda <b>(📥 Carga de Dados)</b>.</li>
+            <li>Anexe o arquivo <b>.xlsx</b>.</li>
         </ol>
     </div>
     """, unsafe_allow_html=True)
