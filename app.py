@@ -42,8 +42,17 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# MOTOR DE CATEGORIZAÇÃO (CFO ENGINE)
+# FUNÇÕES DE PROCESSAMENTO
 # ---------------------------------------------------------
+def converter_valor_ptbr(val):
+    if pd.isna(val): return 0.0
+    if isinstance(val, (int, float)): return float(val)
+    val_str = str(val).replace('.', '').replace(',', '.')
+    try:
+        return float(val_str)
+    except:
+        return 0.0
+
 def categorizar_plano_contas(plano):
     if pd.isna(plano):
         return "5. DESPESAS OPERACIONAIS & VENDAS"
@@ -64,7 +73,19 @@ def categorizar_plano_contas(plano):
         return "5. DESPESAS OPERACIONAIS & VENDAS"
 
 @st.cache_data(ttl=3600)
-def processar_arquivo_bruto(file):
+def processar_relatorio_receitas(file, nome_loja):
+    df_raw = pd.read_excel(file)
+    df_raw.columns = [str(c).strip().upper() for c in df_raw.columns]
+    
+    col_total = 'TOTAL COM PRAZO' if 'TOTAL COM PRAZO' in df_raw.columns else 'TOTAL SEM PRAZO'
+    if col_total not in df_raw.columns:
+        col_total = [c for c in df_raw.columns if 'TOTAL' in c][0]
+        
+    total_vendas = df_raw[col_total].apply(converter_valor_ptbr).sum()
+    return total_vendas
+
+@st.cache_data(ttl=3600)
+def processar_arquivo_despesas(file):
     df_raw = pd.read_excel(file)
     
     header_idx = None
@@ -100,9 +121,16 @@ st.markdown("<div class='main-subtitle'>Acompanhamento de liquidez, governança 
 with st.sidebar:
     st.header("⚙️ Parâmetros")
     saldo_inicial = st.number_input("Saldo Inicial em Conta (R$)", value=36945.97, step=1000.0, format="%.2f")
+    
     st.divider()
-    st.header("📥 Carga de Dados")
-    uploaded_file = st.file_uploader("Anexe o relatório (.xlsx)", type=["xlsx", "xls"])
+    st.header("📥 Relatório ERP (Despesas)")
+    uploaded_file = st.file_uploader("Anexe o Rateio de Títulos (.xlsx)", type=["xlsx", "xls"])
+    
+    st.divider()
+    st.header("🍦 Faturamento Lojas (Receitas)")
+    file_pantanal = st.file_uploader("Vendas Pantanal (.xlsx)", type=["xlsx", "xls"], key="p")
+    file_goiabeiras = st.file_uploader("Vendas Goiabeiras (.xlsx)", type=["xlsx", "xls"], key="g")
+    file_estacao = st.file_uploader("Vendas Estação (.xlsx)", type=["xlsx", "xls"], key="e")
 
 if 'filtro_kpi' not in st.session_state:
     st.session_state.filtro_kpi = "PENDENTE"
@@ -112,7 +140,16 @@ if 'filtro_kpi' not in st.session_state:
 # ---------------------------------------------------------
 if uploaded_file is not None:
     try:
-        df = processar_arquivo_bruto(uploaded_file)
+        df = processar_arquivo_despesas(uploaded_file)
+        
+        # Processar Receitas das Lojas (se anexadas)
+        tot_receita_lojas = 0.0
+        if file_pantanal is not None:
+            tot_receita_lojas += processar_relatorio_receitas(file_pantanal, "Pantanal")
+        if file_goiabeiras is not None:
+            tot_receita_lojas += processar_relatorio_receitas(file_goiabeiras, "Goiabeiras")
+        if file_estacao is not None:
+            tot_receita_lojas += processar_relatorio_receitas(file_estacao, "Estação")
         
         min_date = df['Vencimento_dt'].min().date() if not df['Vencimento_dt'].isnull().all() else pd.to_datetime('today').date()
         max_date = df['Vencimento_dt'].max().date() if not df['Vencimento_dt'].isnull().all() else pd.to_datetime('today').date()
@@ -151,11 +188,13 @@ if uploaded_file is not None:
 
         st.divider()
 
-        # CÁLCULO DOS KPIS ORIGINAIS
+        # CÁLCULO DOS KPIS
         tot_previsto = df_filtered['Valor'].sum()
         tot_realizado = df_filtered[df_filtered['Status_Clean'] == 'REALIZADO']['Valor'].sum()
         tot_pendente = df_filtered[df_filtered['Status_Clean'] == 'PENDENTE']['Valor'].sum()
-        geracao_caixa = saldo_inicial - tot_realizado
+        
+        # Geração de Caixa considerando Receitas
+        geracao_caixa = (saldo_inicial + tot_receita_lojas) - tot_realizado
 
         st.caption("👇 **Clique nos botões para filtrar os títulos na tabela inferior:**")
 
@@ -178,7 +217,8 @@ if uploaded_file is not None:
                 st.session_state.filtro_kpi = "PENDENTE"
 
         with k5:
-            st.metric("Geração de Caixa", f"R$ {geracao_caixa:,.2f}")
+            delta_label = f"Vendas: R$ {tot_receita_lojas:,.2f}" if tot_receita_lojas > 0 else None
+            st.metric("Geração de Caixa", f"R$ {geracao_caixa:,.2f}", delta=delta_label)
 
         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -223,7 +263,7 @@ if uploaded_file is not None:
 
         st.divider()
 
-        # 2. DETALHAMENTO DOS TÍTULOS POSICIONADO NO FINAL DA PÁGINA
+        # 2. DETALHAMENTO DOS TÍTULOS
         if st.session_state.filtro_kpi == "REALIZADO":
             df_titulos = df_filtered[df_filtered['Status_Clean'] == 'REALIZADO'].copy()
             titulo_tabela = f"🟢 Exibindo {len(df_titulos)} Títulos LIQUIDADOS (R$ {tot_realizado:,.2f})"
@@ -253,8 +293,8 @@ else:
         <h3>🍦 Painel de Fluxo de Caixa Executivo - Gelateria Borelli</h3>
         <p>Aguardando carga do relatório do ERP para inicializar o processamento.</p>
         <ol>
-            <li>Acesse o menu lateral à esquerda <b>(📥 Carga de Dados)</b>.</li>
-            <li>Anexe o arquivo <b>.xlsx</b>.</li>
+            <li>Anexe o arquivo de despesas no menu lateral <b>(📥 Relatório ERP)</b>.</li>
+            <li>Opcionalmente, anexe o faturamento das lojas para compor a Geração de Caixa.</li>
         </ol>
     </div>
     """, unsafe_allow_html=True)
