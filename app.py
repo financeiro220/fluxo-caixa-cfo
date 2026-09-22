@@ -45,11 +45,15 @@ st.markdown("""
 # MOTOR DE CATEGORIZAÇÃO (CFO ENGINE: ENTRADAS & SAÍDAS)
 # ---------------------------------------------------------
 def categorizar_plano_contas(row):
-    tipo = str(row.get('Tipo', '')).strip().lower()
-    plano = str(row.get('Plano de Contas', '')).upper().strip()
+    # Trata valores nulos/float convertendo para string limpa
+    tipo_val = row.get('Tipo', '')
+    tipo = str(tipo_val).strip().lower() if pd.notna(tipo_val) else ''
+    
+    plano_val = row.get('Plano de Contas', '')
+    plano = str(plano_val).upper().strip() if pd.notna(plano_val) else ''
     
     # Se for título de RECEBER / ENTRADA
-    if 'receber' in tipo or 'entrada' in tipo or 'venda' in tipo:
+    if any(k in tipo for k in ['receber', 'entrada', 'venda', 'receita']):
         if any(k in plano for k in ['IFOOD', 'DELIVERY', 'APP']):
             return "0. RECEITA - DELIVERY / IFOOD"
         elif any(k in plano for k in ['CARTÃO', 'CARTAO', 'PIX', 'DINHEIRO', 'BALCÃO', 'BALCAO']):
@@ -93,13 +97,13 @@ def processar_arquivo_bruto(file):
     df['Dia'] = df['Vencimento_dt'].dt.day
     df['Categoria_CFO'] = df.apply(categorizar_plano_contas, axis=1)
     
-    # Identificar fluxo: Entradas vs Saídas
+    # Identificar fluxo seguro contra valores nulos em 'Tipo'
     df['Tipo_Fluxo'] = df['Tipo'].astype(str).apply(
-        lambda x: "ENTRADA" if any(s in x.lower() for s in ['receber', 'entrada']) else "SAÍDA"
+        lambda x: "ENTRADA" if any(s in str(x).lower() for s in ['receber', 'entrada', 'receita']) else "SAÍDA"
     )
     
     df['Status_Clean'] = df['Status'].astype(str).apply(
-        lambda x: "REALIZADO" if any(s in x for s in ['Liquidado', 'Baixado', 'Conciliado']) else "PENDENTE"
+        lambda x: "REALIZADO" if any(s in str(x) for s in ['Liquidado', 'Baixado', 'Conciliado']) else "PENDENTE"
     )
     return df
 
@@ -201,13 +205,9 @@ if uploaded_file is not None:
         with tab1:
             st.subheader("Demonstrativo do Fluxo de Caixa Completo (Entradas vs. Saídas)")
             
-            # Estruturação da DRE
             dre_data = []
-            
-            # Receitas
             dre_data.append({"Item": "1. RECEITAS OPERACIONAIS (ENTRADAS)", "Valor (R$)": f"R$ {tot_receitas:,.2f}", "% Vendas": "100.0%"})
             
-            # Despesas por Categoria
             cats_saida = [
                 "1. FORNECEDORES / MERCADORIAS (CMV)",
                 "2. IMPOSTOS SOBRE VENDAS",
@@ -241,7 +241,7 @@ if uploaded_file is not None:
 
         st.divider()
 
-        # 2. INSPEÇÃO DE TÍTULOS ABAIXO DAS RELATÓRIOS
+        # 2. INSPEÇÃO DE TÍTULOS ABAIXO DOS RELATÓRIOS
         if st.session_state.filtro_kpi == "ENTRADA":
             df_titulos = df_filtered[df_filtered['Tipo_Fluxo'] == 'ENTRADA'].copy()
             titulo_tabela = f"🟢 Exibindo {len(df_titulos)} Títulos de RECEITA / ENTRADA (R$ {tot_receitas:,.2f})"
