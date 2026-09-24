@@ -1,10 +1,12 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import requests
 import json
 import re
 from datetime import datetime, date, timedelta
+
+# IMPORTAÇÃO DO MÓDULO F360
+from f360_api import autenticar_f360, buscar_parcelas_f360
 
 # ---------------------------------------------------------
 # CONFIGURAÇÃO DA PÁGINA E TEMA BORELLI
@@ -44,8 +46,11 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# TOKEN API F360 E MAPA DE CNPJS NORMALIZADOS
-F360_TOKEN = "11001cbb-792d-45e5-b2f9-03ffc46fe7ed"
+# TENTATIVA DE OBTER TOKEN DE SECRETS SE EXISTIR
+try:
+    F360_TOKEN = st.secrets["F360_TOKEN"]
+except Exception:
+    F360_TOKEN = "11001cbb-792d-45e5-b2f9-03ffc46fe7ed"
 
 MAPA_CNPJ_LOJA = {
     "36240923000168": "4- PANTANAL",
@@ -54,23 +59,8 @@ MAPA_CNPJ_LOJA = {
 }
 
 # ---------------------------------------------------------
-# AUTENTICAÇÃO E REGRAS DA API DE PARCELAS F360
+# CATEGORIZAÇÃO CFO & CACHE WRAPPER DA API
 # ---------------------------------------------------------
-def autenticar_f360(token_api):
-    url = "https://financas.f360.com.br/PublicLoginAPI/DoLogin"
-    headers = {"Content-Type": "application/json"}
-    payload = {"token": token_api}
-    try:
-        r = requests.post(url, json=payload, headers=headers, timeout=10)
-        if r.status_code == 200:
-            res = r.json()
-            if isinstance(res, dict):
-                return res.get("Token") or res.get("Result") or res.get("token")
-            return res
-        return None
-    except:
-        return None
-
 def categorizar_plano_contas(plano):
     if pd.isna(plano):
         return "5. DESPESAS OPERACIONAIS & VENDAS"
@@ -92,123 +82,15 @@ def categorizar_plano_contas(plano):
     else:
         return "5. DESPESAS OPERACIONAIS & VENDAS"
 
-def consultar_parcelas_titulos_f360(jwt_token, d_inicio, d_fim):
-    url = "https://financas.f360.com.br/ParcelasDeTituloPublicAPI/ListarParcelasDeTitulos"
-    headers = {
-        "Authorization": f"Bearer {jwt_token}",
-        "Content-Type": "application/json"
-    }
-    
-    todas_parcelas = {}
-    
-    # 1. Consulta por Vencimento e por Liquidação para garantir parcelas do mês
-    tipos_data = ["Vencimento", "Liquidacao"]
-    
-    for t_data in tipos_data:
-        pagina = 1
-        tem_mais = True
-        
-        while tem_mais:
-            payload = {
-                "DataInicio": d_inicio.strftime("%Y-%m-%d"),
-                "DataFim": d_fim.strftime("%Y-%m-%d"),
-                "TipoData": t_data,
-                "Pagina": pagina,
-                "ItensPorPagina": 100
-            }
-            
-            try:
-                r = requests.post(url, json=payload, headers=headers, timeout=12)
-                if r.status_code == 200:
-                    res = r.json()
-                    itens = res.get("Result", []) if isinstance(res, dict) else res
-                    if isinstance(itens, list) and len(itens) > 0:
-                        for p in itens:
-                            p_id = p.get("ParcelaId") or p.get("Id") or f"{p.get('Numero')}_{p.get('ValorBruto')}"
-                            todas_parcelas[p_id] = p
-                        if len(itens) < 100:
-                            tem_mais = False
-                        else:
-                            pagina += 1
-                    else:
-                        tem_mais = False
-                else:
-                    tem_mais = False
-            except:
-                tem_mais = False
-
-    return list(todas_parcelas.values())
-
-def processar_dados_parcelas_f360(parcelas_list):
-    registros = []
-    
-    for p in parcelas_list:
-        if p.get("Cancelada") or str(p.get("Status", "")).lower() in ["cancelado", "baixado"]:
-            continue
-            
-        cnpj_cru = re.sub(r'\D', '', str(p.get("CnpjEmpresa") or p.get("CNPJEmpresa") or ""))
-        empresa_nome = MAPA_CNPJ_LOJA.get(cnpj_cru, cnpj_cru)
-        
-        val_bruto_parcela = float(p.get("ValorBruto") or p.get("Valor") or 0.0)
-        
-        # Datas de Caixa e Vencimento Real
-        dt_venc = pd.to_datetime(p.get("Vencimento") or p.get("DataVencimento"), errors='coerce')
-        dt_liq = pd.to_datetime(p.get("Liquidacao") or p.get("DataLiquidacao"), errors='coerce')
-        
-        status_st = "REALIZADO" if pd.notna(dt_liq) or any(s in str(p.get("Status", "")).lower() for s in ['liquidado', 'conciliado']) else "PENDENTE"
-        
-        # Data para curva de caixa: Liquidação se pago, Vencimento se pendente
-        dt_caixa = dt_liq if (status_st == "REALIZADO" and pd.notna(dt_liq)) else dt_venc
-        if pd.isna(dt_caixa):
-            dt_caixa = dt_venc if pd.notna(dt_venc) else pd.to_datetime('today')
-
-        # Rateio Proporcional
-        rateios = p.get("Rateio") or p.get("Rateios") or []
-        if isinstance(rateios, list) and len(rateios) > 0:
-            tot_rateio = sum([float(r.get("Valor", 0.0)) for r in rateios])
-            tot_rateio = tot_rateio if tot_rateio > 0 else val_bruto_parcela
-            
-            for r in rateios:
-                val_r = float(r.get("Valor", 0.0))
-                prop = (val_r / tot_rateio) if tot_rateio > 0 else (1.0 / len(rateios))
-                val_efetivo = val_bruto_parcela * prop
-                
-                plano_nome = r.get("PlanoDeContas") or r.get("NomePlanoDeContas") or p.get("PlanoDeContas") or "Outros"
-                
-                registros.append({
-                    "Número": p.get("NumeroTitulo") or p.get("Numero") or "",
-                    "Empresa": empresa_nome,
-                    "Cliente / Fornecedor": p.get("NomePessoa") or p.get("Fornecedor") or p.get("Cliente") or "",
-                    "Vencimento_dt": dt_caixa,
-                    "Vencimento_real": dt_venc,
-                    "Valor": val_efetivo,
-                    "Plano de Contas": plano_nome,
-                    "Categoria_CFO": categorizar_plano_contas(plano_nome),
-                    "Status_Clean": status_st,
-                    "Dia": dt_caixa.day if pd.notna(dt_caixa) else 1
-                })
-        else:
-            plano_nome = p.get("PlanoDeContas") or "Outros"
-            registros.append({
-                "Número": p.get("NumeroTitulo") or p.get("Numero") or "",
-                "Empresa": empresa_nome,
-                "Cliente / Fornecedor": p.get("NomePessoa") or p.get("Fornecedor") or p.get("Cliente") or "",
-                "Vencimento_dt": dt_caixa,
-                "Vencimento_real": dt_venc,
-                "Valor": val_bruto_parcela,
-                "Plano de Contas": plano_nome,
-                "Categoria_CFO": categorizar_plano_contas(plano_nome),
-                "Status_Clean": status_st,
-                "Dia": dt_caixa.day if pd.notna(dt_caixa) else 1
-            })
-
-    df = pd.DataFrame(registros)
+@st.cache_data(ttl=600, show_spinner=False)
+def carregar_api(_jwt, d_ini, d_fim):
+    df = buscar_parcelas_f360(_jwt, d_ini, d_fim, MAPA_CNPJ_LOJA, tipo="Despesa")
     if not df.empty:
-        df['Vencimento_dt'] = pd.to_datetime(df['Vencimento_dt'])
+        df["Categoria_CFO"] = df["Plano de Contas"].apply(categorizar_plano_contas)
     return df
 
 # ---------------------------------------------------------
-# PROCESSAMENTO DE FICHEIROS LOCAIS (EXCEL / JSON FALLBACK)
+# FUNÇÕES DE CARGA OFFLINE (EXCEL / JSON)
 # ---------------------------------------------------------
 def processar_json_f360(data_json):
     df = pd.DataFrame(data_json)
@@ -229,6 +111,8 @@ def processar_json_f360(data_json):
         return pd.to_datetime(row.get('DataCompetencia'), format='%d/%m/%Y', errors='coerce')
 
     df['Vencimento_dt'] = df.apply(extrair_vencimento, axis=1)
+    df['Vencimento_real'] = pd.to_datetime(df.get('DataDoLcto'), format='%d/%m/%Y', errors='coerce')
+    
     df = df.dropna(subset=['Vencimento_dt']).copy()
     df['Vencimento_dt'] = pd.to_datetime(df['Vencimento_dt'])
     df['Dia'] = df['Vencimento_dt'].dt.day
@@ -264,6 +148,7 @@ def processar_arquivo_despesas(file):
     
     df['Valor'] = pd.to_numeric(df['Valor Bruto'], errors='coerce').fillna(0)
     df['Vencimento_dt'] = pd.to_datetime(df['Vencimento'], errors='coerce')
+    df['Vencimento_real'] = df['Vencimento_dt']
     df = df.dropna(subset=['Vencimento_dt']).copy()
     df['Vencimento_dt'] = pd.to_datetime(df['Vencimento_dt'])
     df['Dia'] = df['Vencimento_dt'].dt.day
@@ -312,7 +197,7 @@ def processar_fluxo_caixa_loja(file, nome_loja):
     return df
 
 # ---------------------------------------------------------
-# INTERFACE DO USUÁRIO
+# INTERFACE DO USUÁRIO & SIDEBAR
 # ---------------------------------------------------------
 st.markdown("<div class='main-title'>🍦 Gelateria Borelli - Gestão de Fluxo de Caixa</div>", unsafe_allow_html=True)
 st.markdown("<div class='main-subtitle'>Acompanhamento de liquidez, governança e extrato acumulado diário</div>", unsafe_allow_html=True)
@@ -321,31 +206,25 @@ with st.sidebar:
     st.header("⚡ Integração F360 API")
     usar_api = st.toggle("Usar API F360 (Tempo Real)", value=False)
     
-    df_desp = None
-    
     if usar_api:
-        jwt_token = autenticar_f360(F360_TOKEN)
-        if jwt_token:
-            st.success("🟢 Sessão JWT Válida!")
+        if "jwt" not in st.session_state:
+            st.session_state.jwt = autenticar_f360(F360_TOKEN)
             
-            d_atual = date(2026, 9, 1) # Ajustado para o mês deSetembro/2026 das lojas
-            d_inicio_janela = date(2026, 9, 1)
-            d_fim_janela = date(2026, 9, 30)
+        if st.session_state.jwt:
+            st.success("🟢 Sessão JWT válida")
+            hoje = date(2026, 9, 1) # Data base ajustada para o período atual das lojas
+            periodo_api = st.date_input("Período de Busca", (hoje.replace(day=1), hoje + timedelta(days=30)), format="DD/MM/YYYY")
             
-            with st.spinner("🔄 A consultar parcelas e rateios em tempo real na F360..."):
-                parcelas_raw = consultar_parcelas_titulos_f360(jwt_token, d_inicio_janela, d_fim_janela)
-                if len(parcelas_raw) > 0:
-                    df_desp = processar_dados_parcelas_f360(parcelas_raw)
-                    st.success(f"🟢 {len(df_desp)} lançamentos sincronizados via API!")
-                else:
-                    st.warning("⚠️ Nenhuma parcela encontrada na API para Setembro/2026.")
+            if st.button("🚀 Buscar parcelas no F360") and len(periodo_api) == 2:
+                with st.spinner("Consultando F360..."):
+                    st.session_state.df_api = carregar_api(st.session_state.jwt, *periodo_api)
         else:
-            st.error("🔴 Falha na autenticação JWT F360")
+            st.error("🔴 Falha na autenticação F360")
             
     st.divider()
     st.header("📥 Relatório ERP / F360 (Offline)")
     json_f360_file = st.file_uploader("Anexe o Ficheiro JSON F360 (.json)", type=["json"])
-    uploaded_file = st.file_uploader("OU Anexe o Rateio de Títulos em Excel (.xlsx)", type=["xlsx", "xls"])
+    uploaded_file = st.file_uploader("OU Anexe o Rateio em Excel (.xlsx)", type=["xlsx", "xls"])
     
     st.divider()
     st.header("🍦 Fluxo de Caixa Por Loja")
@@ -356,21 +235,25 @@ with st.sidebar:
 if 'filtro_kpi' not in st.session_state:
     st.session_state.filtro_kpi = "PENDENTE"
 
-# RENDERIZAÇÃO
-if df_desp is None or df_desp.empty:
-    if json_f360_file is not None:
-        try:
-            data_j = json.load(json_f360_file)
-            df_desp = processar_json_f360(data_j)
-            st.sidebar.success(f"🟢 JSON F360 Carregado com {len(df_desp)} títulos!")
-        except Exception as e:
-            st.sidebar.error(f"Erro ao ler JSON F360: {e}")
-    elif uploaded_file is not None:
-        try:
-            df_desp = processar_arquivo_despesas(uploaded_file)
-            st.sidebar.success(f"🟢 Rateio Excel Carregado com {len(df_desp)} lançamentos!")
-        except Exception as e:
-            st.sidebar.error(f"Erro ao ler Excel: {e}")
+# RENDERIZAÇÃO E FONTE DE DADOS
+df_desp = None
+
+if json_f360_file is not None:
+    try:
+        data_j = json.load(json_f360_file)
+        df_desp = processar_json_f360(data_j)
+        st.sidebar.success(f"🟢 JSON F360: {len(df_desp)} lançamentos")
+    except Exception as e:
+        st.sidebar.error(f"Erro ao ler JSON: {e}")
+elif uploaded_file is not None:
+    try:
+        df_desp = processar_arquivo_despesas(uploaded_file)
+        st.sidebar.success(f"🟢 Rateio Excel: {len(df_desp)} lançamentos")
+    except Exception as e:
+        st.sidebar.error(f"Erro ao ler Excel: {e}")
+elif st.session_state.get("df_api") is not None:
+    df_desp = st.session_state.df_api
+    st.sidebar.success(f"🟢 API F360: {len(df_desp)} lançamentos")
 
 if df_desp is not None and not df_desp.empty:
     try:
@@ -396,7 +279,7 @@ if df_desp is not None and not df_desp.empty:
             loja_selecionada = st.radio("", lojas_opcoes, horizontal=True)
 
         with col_filtro2:
-            st.caption("📅 **Período de Vencimento:**")
+            st.caption("📅 **Período de Caixa (Liquidação / Vencimento):**")
             date_range = st.date_input(
                 "",
                 value=(min_date, max_date),
@@ -597,24 +480,31 @@ if df_desp is not None and not df_desp.empty:
         st.subheader(titulo_tabela)
         
         df_display = df_titulos.copy()
-        df_display['Vencimento'] = df_display['Vencimento_dt'].dt.strftime('%d/%m/%Y')
+        df_display['Data de Caixa'] = df_display['Vencimento_dt'].dt.strftime('%d/%m/%Y')
         
+        # Exibição da coluna Vencimento Real se disponível
+        if 'Vencimento_real' in df_display.columns:
+            df_display['Vencimento Orig.'] = pd.to_datetime(df_display['Vencimento_real']).dt.strftime('%d/%m/%Y')
+            cols_grid = ['Número', 'Empresa', 'Cliente / Fornecedor', 'Data de Caixa', 'Vencimento Orig.', 'Valor', 'Plano de Contas', 'Categoria_CFO', 'Status_Clean']
+        else:
+            cols_grid = ['Número', 'Empresa', 'Cliente / Fornecedor', 'Data de Caixa', 'Valor', 'Plano de Contas', 'Categoria_CFO', 'Status_Clean']
+            
         st.dataframe(
-            df_display[['Número', 'Empresa', 'Cliente / Fornecedor', 'Vencimento', 'Valor', 'Plano de Contas', 'Categoria_CFO', 'Status_Clean']],
+            df_display[cols_grid],
             use_container_width=True,
             hide_index=True
         )
 
     except Exception as e:
-        st.error(f"Erro ao processar o arquivo: {e}")
+        st.error(f"Erro ao processar os dados: {e}")
 else:
     st.markdown("""
     <div class='welcome-card'>
         <h3>🍦 Painel de Fluxo de Caixa Executivo - Gelateria Borelli</h3>
         <p>Aguardando carga dos relatórios no menu lateral para inicializar o processamento.</p>
         <ol>
-            <li>Ative a opção <b>Usar API F360 (Tempo Real)</b> no menu lateral.</li>
-            <li>OU anexe o ficheiro <b>JSON / Excel do Rateio</b>.</li>
+            <li>Ative a opção <b>Usar API F360 (Tempo Real)</b> no menu lateral e clique em <b>Buscar parcelas no F360</b>.</li>
+            <li>OU anexe o ficheiro <b>JSON / Excel de Rateio</b> no menu lateral.</li>
         </ol>
     </div>
     """, unsafe_allow_html=True)
