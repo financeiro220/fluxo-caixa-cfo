@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
-from datetime import datetime
+from datetime import datetime, date
 
 # ---------------------------------------------------------
 # CONFIGURAÇÃO DA PÁGINA E TEMA BORELLI
@@ -14,7 +14,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Estilização CSS Personalizada (Identidade Borelli)
 st.markdown("""
 <style>
     .stApp {
@@ -43,117 +42,78 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# TOKEN API F360 E MAPA DE CNPJS DAS UNIDADES BORELLI
+# TOKEN API F360 E CNPJS
 F360_TOKEN = "11001cbb-792d-45e5-b2f9-03ffc46fe7ed"
 
-LOJAS_CNPJ = {
-    "4- PANTANAL": {"cnpj": "36.240.923/0001-68", "clean": "36240923000168"},
-    "5- ESTAÇÃO": {"cnpj": "36.240.923/0002-49", "clean": "36240923000249"},
-    "8 - GOIABEIRAS": {"cnpj": "36.240.923/0003-20", "clean": "36240923000320"}
-}
+LOJAS_CNPJ = [
+    "36.240.923/0001-68", # Pantanal
+    "36.240.923/0002-49", # Estação
+    "36.240.923/0003-20"  # Goiabeiras
+]
 
 # ---------------------------------------------------------
-# CONEXÃO F360 CONFORME DOCUMENTAÇÃO POSTMAN OFICIAL
+# AUTENTICAÇÃO E RELATÓRIOS SEGUNDO MANUAL OFICIAL
 # ---------------------------------------------------------
-@st.cache_data(ttl=300)
-def realizar_login_f360(token_api):
-    url_login = "https://financas.f360.com.br/PublicLoginAPI/DoLogin"
+def autenticar_f360(token_api):
+    url = "https://financas.f360.com.br/PublicLoginAPI/DoLogin"
     headers = {"Content-Type": "application/json"}
     payload = {"token": token_api}
+    
     try:
-        r = requests.post(url_login, json=payload, headers=headers, timeout=10)
+        r = requests.post(url, json=payload, headers=headers, timeout=10)
         if r.status_code == 200:
-            res_data = r.json()
-            # O F360 pode retornar o token de sessão direto na raiz ou num objeto Result
-            if isinstance(res_data, dict):
-                return res_data.get("Token") or res_data.get("Result") or res_data.get("token") or token_api
-            elif isinstance(res_data, str):
-                return res_data
-        return token_api
+            res = r.json()
+            if isinstance(res, dict):
+                return res.get("Token") or res.get("Result") or res.get("token")
+            return res
+        return None
     except:
-        return token_api
+        return None
 
-def consultar_endpoint_postman(session_token, path_endpoint, payload=None):
-    url_base = "https://financas.f360.com.br"
-    url_completa = f"{url_base}{path_endpoint}"
-    
-    # Headers oficiais de sessão segundo especificação do Postman F360
+def gerar_relatorio_f360(jwt_token, data_inicio, data_fim):
+    url = "https://financas.f360.com.br/PublicRelatorioAPI/GerarRelatorio"
     headers = {
-        "Content-Type": "application/json",
-        "token": str(session_token),
-        "Authorization": str(session_token)
+        "Authorization": f"Bearer {jwt_token}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "Data": data_inicio.strftime("%Y-%m-%d"),
+        "Fim": data_fim.strftime("%Y-%m-%d"),
+        "ModeloContabil": "provisao",
+        "ModeloRelatorio": "gerencial",
+        "ExtensaoDeArquivo": "json",
+        "EnviarNotificacaoPorWebhook": False,
+        "URLNotificaticao": "",
+        "Contas": "",
+        "CNPJEmpresas": LOJAS_CNPJ
     }
     
     try:
-        if payload:
-            r = requests.post(url_completa, json=payload, headers=headers, timeout=8)
-        else:
-            r = requests.get(url_completa, headers=headers, timeout=8)
-            
-        if r.status_code in [200, 201]:
+        r = requests.post(url, json=payload, headers=headers, timeout=10)
+        if r.status_code == 200:
             res = r.json()
-            qtd = len(res) if isinstance(res, list) else 1
-            return True, f"🟢 Conectado em {path_endpoint} ({qtd} registros)", res
+            return True, f"🟢 Relatório Gerado com Sucesso! (ID Processamento: {res.get('Result', 'OK')})", res
         else:
-            return False, f"HTTP {r.status_code} ({path_endpoint})", None
+            return False, f"HTTP {r.status_code}: {r.text[:120]}", None
     except Exception as e:
-        return False, f"Erro: {str(e)}", None
+        return False, f"Erro na requisição: {str(e)}", None
 
-def diagnosticar_modulos_f360(session_token):
-    status_diag = {}
-    
-    # Payload no padrão de formato de datas da API F360
-    payload_datas = {
-        "DataInicio": "2026-09-01",
-        "DataFim": "2026-09-30",
-        "Cnpjs": [info["cnpj"] for info in LOJAS_CNPJ.values()]
+def consultar_contas_bancarias_f360(jwt_token):
+    url = "https://financas.f360.com.br/ContaBancariaPublicAPI/ListarContasBancarias"
+    headers = {
+        "Authorization": f"Bearer {jwt_token}",
+        "Content-Type": "application/json"
     }
-    
-    # 1. Testar Rotas de Títulos (Rateio / A Pagar)
-    rotas_titulos = [
-        "/PublicRelatorioAPI/GerarRelatorioTitulos",
-        "/TitulosPublicAPI/ObterTitulos",
-        "/PublicAPI/TitulosPublicAPI/ObterTitulos"
-    ]
-    ok_t = False
-    for r in rotas_titulos:
-        ok_t, msg_t, data_t = consultar_endpoint_postman(session_token, r, payload_datas)
-        if ok_t:
-            status_diag["titulos"] = {"ok": True, "msg": msg_t, "data": data_t}
-            break
-    if not ok_t:
-        status_diag["titulos"] = {"ok": False, "msg": "🔴 Rota de Títulos não respondeu 200"}
-
-    # 2. Testar Rotas de Caixas / Extrato
-    rotas_caixas = [
-        "/CaixasPublicAPI/ObterCaixas",
-        "/PublicRelatorioAPI/GerarRelatorioExtrato",
-        "/PublicAPI/CaixasPublicAPI/ObterCaixas"
-    ]
-    ok_c = False
-    for r in rotas_caixas:
-        ok_c, msg_c, data_c = consultar_endpoint_postman(session_token, r, payload_datas)
-        if ok_c:
-            status_diag["caixas"] = {"ok": True, "msg": msg_c, "data": data_c}
-            break
-    if not ok_c:
-        status_diag["caixas"] = {"ok": False, "msg": "🔴 Rota de Caixas não respondeu 200"}
-
-    # 3. Testar Rotas de Empresas / Cadastro Lojas
-    rotas_empresas = [
-        "/EmpresasPublicAPI/ObterEmpresas",
-        "/PublicAPI/EmpresasPublicAPI/ObterEmpresas"
-    ]
-    ok_e = False
-    for r in rotas_empresas:
-        ok_e, msg_e, data_e = consultar_endpoint_postman(session_token, r)
-        if ok_e:
-            status_diag["empresas"] = {"ok": True, "msg": msg_e, "data": data_e}
-            break
-    if not ok_e:
-        status_diag["empresas"] = {"ok": False, "msg": "🔴 Rota de Empresas não respondeu 200"}
-
-    return status_diag
+    try:
+        r = requests.get(url, headers=headers, timeout=8)
+        if r.status_code == 200:
+            res = r.json()
+            qtd = len(res.get("Result", [])) if isinstance(res, dict) else len(res)
+            return True, f"🟢 {qtd} Contas Bancárias encontradas"
+        return False, f"HTTP {r.status_code}"
+    except:
+        return False, "Erro ao conectar"
 
 # ---------------------------------------------------------
 # FUNÇÕES DE PROCESSAMENTO DE PLANILHAS
@@ -246,30 +206,30 @@ def processar_arquivo_despesas(file):
     return df
 
 # ---------------------------------------------------------
-# CABEÇALHO DA PÁGINA
+# INTERFACE DO USUÁRIO
 # ---------------------------------------------------------
 st.markdown("<div class='main-title'>🍦 Gelateria Borelli - Gestão de Fluxo de Caixa</div>", unsafe_allow_html=True)
 st.markdown("<div class='main-subtitle'>Acompanhamento de liquidez, governança e extrato acumulado diário</div>", unsafe_allow_html=True)
 
-# BARRA LATERAL
 with st.sidebar:
     st.header("⚡ Integração F360 API")
-    usar_api_f360 = st.toggle("Usar API F360 (Tempo Real)", value=False)
+    usar_api = st.toggle("Usar API F360 (Tempo Real)", value=False)
     
-    token_sessao = None
-    if usar_api_f360:
-        token_sessao = realizar_login_f360(F360_TOKEN)
-        if token_sessao:
-            st.success("🟢 Sessão Válida na F360!")
-            st.caption("📋 **Mapeamento Postman F360:**")
-            diag = diagnosticar_modulos_f360(token_sessao)
+    if usar_api:
+        jwt_token = autenticar_f360(F360_TOKEN)
+        if jwt_token:
+            st.success("🟢 Sessão JWT Válida!")
+            d_ini = date(2026, 9, 1)
+            d_fim = date(2026, 9, 30)
             
-            st.write(f"• **Rateio/Pagar:** {diag['titulos']['msg']}")
-            st.write(f"• **Extrato/Caixa:** {diag['caixas']['msg']}")
-            st.write(f"• **Lojas/Cadastro:** {diag['empresas']['msg']}")
+            ok_rel, msg_rel, _ = gerar_relatorio_f360(jwt_token, d_ini, d_fim)
+            ok_cb, msg_cb = consultar_contas_bancarias_f360(jwt_token)
+            
+            st.write(f"• **Gerar Relatório:** {msg_rel}")
+            st.write(f"• **Contas Bancárias:** {msg_cb}")
         else:
             st.error("🔴 Falha ao autenticar token no DoLogin F360")
-    
+            
     st.divider()
     st.header("📥 Relatório ERP (Despesas)")
     uploaded_file = st.file_uploader("Anexe o Rateio de Títulos (.xlsx)", type=["xlsx", "xls"])
@@ -283,9 +243,6 @@ with st.sidebar:
 if 'filtro_kpi' not in st.session_state:
     st.session_state.filtro_kpi = "PENDENTE"
 
-# ---------------------------------------------------------
-# RENDERIZAÇÃO
-# ---------------------------------------------------------
 if uploaded_file is not None:
     try:
         df_desp = processar_arquivo_despesas(uploaded_file)
