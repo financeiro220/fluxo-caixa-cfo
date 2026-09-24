@@ -1,18 +1,16 @@
 """
-f360_api.py - Parcelas de título (com Vencimento e Liquidação) via API pública F360.
-
-Endpoint: GET /ParcelasDeTituloPublicAPI/ListarParcelasDeTitulos
-Limites do F360: 100 itens por página, janela máxima de 31 dias por consulta.
+f360_api.py - Integração em Tempo Real com o Fluxo de Caixa da F360.
+Mapeia Receitas, Despesas e o Plano Orçamentário para as contas 17, 51 e 61.
 """
-import re
-from datetime import timedelta
-
-import pandas as pd
 import requests
+import pandas as pd
+import re
+from datetime import datetime, date, timedelta
 
 BASE = "https://financas.f360.com.br"
-JANELA_DIAS = 30  # margem de segurança sobre o limite de 31 dias
+JANELA_DIAS = 30
 
+IDS_CONTAS_BORELLI = ["17", "51", "61"]
 
 def autenticar_f360(token_api):
     try:
@@ -31,7 +29,6 @@ def autenticar_f360(token_api):
         pass
     return None
 
-
 def _janelas(d_ini, d_fim):
     atual = d_ini
     while atual <= d_fim:
@@ -39,16 +36,23 @@ def _janelas(d_ini, d_fim):
         yield atual, fim
         atual = fim + timedelta(days=1)
 
+def _so_digitos(s):
+    return re.sub(r"\D", "", str(s or ""))
+
+def _fmt_cnpj(c):
+    d = _so_digitos(c)
+    return f"{d[:2]}.{d[2:5]}.{d[5:8]}/{d[8:12]}-{d[12:]}" if len(d) == 14 else str(c)
 
 def _listar(jwt, tipo, ini, fim, tipo_datas, cnpjs):
-    """Percorre todas as páginas de uma janela de até 31 dias."""
+    """Consulta o Fluxo de Caixa na API F360 (Ambos = Receita + Despesa)."""
     headers = {"Authorization": f"Bearer {jwt}", "Content-Type": "application/json"}
     url = f"{BASE}/ParcelasDeTituloPublicAPI/ListarParcelasDeTitulos"
     pagina, total, saida = 1, 1, []
+    
     while pagina <= total:
         params = {
             "pagina": pagina,
-            "tipo": tipo,  # Despesa | Receita | Ambos
+            "tipo": tipo,  # "Ambos" para pegar Receitas e Despesas do Fluxo de Caixa
             "inicio": ini.isoformat(),
             "fim": fim.isoformat(),
             "tipoDatas": tipo_datas,
@@ -56,37 +60,29 @@ def _listar(jwt, tipo, ini, fim, tipo_datas, cnpjs):
         }
         if cnpjs:
             params["empresas"] = ",".join(cnpjs)
+            
         r = requests.get(url, headers=headers, params=params, timeout=60)
         if r.status_code != 200:
             raise RuntimeError(f"HTTP {r.status_code}: {r.text[:300]}")
+            
         corpo = r.json()
         if isinstance(corpo, dict) and corpo.get("Ok") is False:
             raise RuntimeError(f"F360 retornou erro: {str(corpo)[:300]}")
+            
         res = corpo.get("Result") or {}
         saida.extend(res.get("Parcelas", []))
         total = res.get("QuantidadeDePaginas", 1) or 1
         pagina += 1
     return saida
 
-
-def _so_digitos(s):
-    return re.sub(r"\D", "", str(s or ""))
-
-
-def _fmt_cnpj(c):
-    """14 dígitos -> 00.000.000/0000-00 (formato usado pelo filtro 'empresas' do F360)."""
-    d = _so_digitos(c)
-    return f"{d[:2]}.{d[2:5]}.{d[5:8]}/{d[8:12]}-{d[12:]}" if len(d) == 14 else str(c)
-
-
 def _da_rede(p, digitos):
     insc = ((p.get("DadosDoTitulo") or {}).get("Empresa") or {}).get("Inscricao")
     return _so_digitos(insc) in digitos
 
-
 def _normaliza(parcelas, mapa_cnpj):
     mapa = {_so_digitos(k): v for k, v in mapa_cnpj.items()}
     linhas = []
+    
     for p in parcelas:
         status = str(p.get("Status", ""))
         s_low = status.lower()
@@ -100,19 +96,26 @@ def _normaliza(parcelas, mapa_cnpj):
         realizado = "liquidado" in s_low or "conciliado" in s_low
 
         bruto = float(p.get("ValorBruto") or 0)
+        tipo_movimento = str(p.get("Tipo") or tit.get("Tipo") or "").lower()
+        
+        # Classifica se é Entrada (Receita) ou Saída (Despesa)
+        is_receita = "receita" in tipo_movimento or "receber" in tipo_movimento
+        
         rateio = p.get("Rateio") or [{}]
         soma = sum(abs(float(r.get("Valor") or 0)) for r in rateio)
 
         for r in rateio:
             peso = abs(float(r.get("Valor") or 0)) / soma if soma else 1 / len(rateio)
+            val_final = bruto * peso
+            
             linhas.append({
                 "ParcelaId": p.get("ParcelaId"),
                 "Número": p.get("Numero") or tit.get("NumeroDoTitulo", ""),
-                "Tipo": p.get("Tipo"),
+                "Tipo_Movimento": "RECEITA" if is_receita else "DESPESA",
                 "Empresa": empresa,
                 "Cliente / Fornecedor": fornecedor,
                 "Plano de Contas": r.get("PlanoDeContas") or "Outros",
-                "Valor": bruto * peso,
+                "Valor": val_final,
                 "Status": status,
                 "Status_Clean": "REALIZADO" if realizado else "PENDENTE",
                 "Vencimento_real": p.get("Vencimento"),
@@ -127,8 +130,7 @@ def _normaliza(parcelas, mapa_cnpj):
     df["Liquidacao_dt"] = pd.to_datetime(df["Liquidacao_raw"], errors="coerce")
     df = df.drop(columns=["Liquidacao_raw"])
 
-    # Data de caixa: liquidação se já pago, senão vencimento.
-    # Mantém o nome Vencimento_dt para o restante do app funcionar sem alterações.
+    # Data de Caixa: usa Liquidação para realizados e Vencimento para previstos/pendentes
     df["Vencimento_dt"] = df["Liquidacao_dt"].where(
         (df["Status_Clean"] == "REALIZADO") & df["Liquidacao_dt"].notna(),
         df["Vencimento_real"],
@@ -137,14 +139,10 @@ def _normaliza(parcelas, mapa_cnpj):
     df["Dia"] = df["Vencimento_dt"].dt.day
     return df
 
-
-def buscar_parcelas_f360(jwt, d_ini, d_fim, mapa_cnpj, tipo="Despesa",
+def buscar_parcelas_f360(jwt, d_ini, d_fim, mapa_cnpj, tipo="Ambos",
                          incluir_liquidacao=True, progresso=None, log=None):
     """
-    Retorna DataFrame de parcelas entre d_ini e d_fim (objetos date).
-    Busca por Vencimento e, opcionalmente, por Liquidação (parcelas que venceram
-    em outro mês mas foram pagas dentro do período). `log` (lista) recebe um
-    resumo de cada chamada, útil para diagnóstico.
+    Busca o Fluxo de Caixa completo (Receitas + Despesas) no F360.
     """
     log = log if log is not None else []
     digitos = {_so_digitos(c) for c in mapa_cnpj}
@@ -155,20 +153,19 @@ def buscar_parcelas_f360(jwt, d_ini, d_fim, mapa_cnpj, tipo="Despesa",
     unicas, passo, total = {}, 0, len(janelas) * len(tipos_data)
     for td in tipos_data:
         for ini, fim in janelas:
-            rotulo = f"{td} {ini:%d/%m/%Y} a {fim:%d/%m/%Y}"
+            rotulo = f"Fluxo de Caixa {td} {ini:%d/%m/%Y} a {fim:%d/%m/%Y}"
             try:
                 itens = _listar(jwt, tipo, ini, fim, td, cnpjs)
-                log.append(f"{rotulo}: {len(itens)} parcelas (filtro de empresas)")
-                if not itens:  # fallback: sem filtro, filtrando localmente
+                log.append(f"{rotulo}: {len(itens)} parcelas carregadas")
+                if not itens:
                     todos = _listar(jwt, tipo, ini, fim, td, [])
                     itens = [p for p in todos if _da_rede(p, digitos)]
-                    log.append(f"   sem filtro de empresas: {len(todos)} parcelas, "
-                               f"{len(itens)} das suas lojas")
+                    log.append(f"   sem filtro de empresas: {len(todos)} parcelas, {len(itens)} filtradas")
             except Exception as e:
                 log.append(f"{rotulo}: ERRO -> {e}")
                 if td == "Vencimento":
                     raise
-                itens = []  # falha na busca por Liquidação não derruba o resto
+                itens = []
             for p in itens:
                 unicas[p.get("ParcelaId")] = p
             passo += 1
