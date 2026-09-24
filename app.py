@@ -53,7 +53,7 @@ MAPA_CNPJ_LOJA = {
 }
 
 # ---------------------------------------------------------
-# AUTENTICAÇÃO E BUSCA F360
+# AUTENTICAÇÃO F360
 # ---------------------------------------------------------
 def autenticar_f360(token_api):
     url = "https://financas.f360.com.br/PublicLoginAPI/DoLogin"
@@ -97,13 +97,27 @@ def categorizar_plano_contas(plano):
 def processar_json_f360(data_json):
     df = pd.DataFrame(data_json)
     
-    # Mapeamento de colunas F360 JSON -> Standard Dashboard
     df['Valor'] = pd.to_numeric(df['ValorLcto'], errors='coerce').fillna(0)
     df['Plano de Contas'] = df['NomePlanoDeContas'].fillna('Outros')
     df['Status_Clean'] = df['StatusTitulo'].astype(str).apply(
         lambda x: "REALIZADO" if any(s in str(x).lower() for s in ['liquidado', 'conciliado']) else "PENDENTE"
     )
-    df['Vencimento_dt'] = pd.to_datetime(df['DataDoLcto'], format='%d/%m/%Y', errors='coerce')
+    
+    # TRATAMENTO CORRETO DAS DATAS DE VENCIMENTO / LIQUIDAÇÃO
+    def definir_data_vencimento(row):
+        # Se for realizado/liquidado e tiver data de liquidação, usa ela
+        if row['Status_Clean'] == 'REALIZADO' and pd.notna(row.get('Liquidacao')):
+            return pd.to_datetime(row['Liquidacao'], errors='coerce')
+        # Senão usa DataCompetencia
+        if pd.notna(row.get('DataCompetencia')):
+            return pd.to_datetime(row['DataCompetencia'], format='%d/%m/%Y', errors='coerce')
+        # Fallback para DataDoLcto
+        return pd.to_datetime(row.get('DataDoLcto'), format='%d/%m/%Y', errors='coerce')
+
+    df['Vencimento_dt'] = df.apply(definir_data_vencimento, axis=1)
+    df = df.dropna(subset=['Vencimento_dt']).copy()
+    df['Dia'] = df['Vencimento_dt'].dt.day
+    
     df['Empresa'] = df['CNPJEmpresa'].map(MAPA_CNPJ_LOJA).fillna(df['CNPJEmpresa'])
     df['Categoria_CFO'] = df['Plano de Contas'].apply(categorizar_plano_contas)
     df['Cliente / Fornecedor'] = df['ComplemHistorico'].astype(str).apply(lambda x: x.split('-')[0].strip() if '-' in x else x[:30])
@@ -251,7 +265,7 @@ if df_desp is not None:
             loja_selecionada = st.radio("", lojas_opcoes, horizontal=True)
 
         with col_filtro2:
-            st.caption("📅 **Período de Vencimento:**")
+            st.caption("📅 **Período de Vencimento / Liquidação:**")
             date_range = st.date_input(
                 "",
                 value=(min_date, max_date),
@@ -393,39 +407,43 @@ if df_desp is not None:
             
             if not df_lojas_filtered.empty:
                 dias_mes = sorted([int(d) for d in df_lojas_filtered['Dia'].dropna().unique() if d > 0])
-                
                 piv_ent = df_lojas_filtered.groupby('Dia')['Entradas'].sum()
                 piv_sai = df_lojas_filtered.groupby('Dia')['Saídas'].sum()
                 piv_sal = df_lojas_filtered.groupby('Dia')['Saldo_Banco'].last()
-                
-                row_e, row_s, row_liq, row_acum = {}, {}, {}, {}
-                
-                for d in dias_mes:
-                    e = piv_ent.get(d, 0.0)
-                    s = piv_sai.get(d, 0.0)
-                    l = e - s
-                    sal = piv_sal.get(d, 0.0)
-                    
-                    row_e[d] = e
-                    row_s[d] = s
-                    row_liq[d] = l
-                    row_acum[d] = sal
-                    
-                df_extrato_diario = pd.DataFrame([
-                    {"Linha de Extrato": "1. (+) Total Entradas", **row_e},
-                    {"Linha de Extrato": "2. (-) Total Saídas", **row_s},
-                    {"Linha de Extrato": "3. (=) Resultado Líquido do Dia", **row_liq},
-                    {"Linha de Extrato": "4. 🏦 SALDO EM CONTA BANCÁRIA", **row_acum}
-                ])
-                
-                cols_order = ["Linha de Extrato"] + dias_mes
-                st.dataframe(
-                    df_extrato_diario[cols_order].style.format({d: "R$ {:,.2f}" for d in dias_mes}),
-                    use_container_width=True,
-                    hide_index=True
-                )
             else:
-                st.info("Anexe a planilha de **Fluxo da Loja** no menu lateral para visualizar a matriz do extrato bancário diário.")
+                # MONTA O FLUXO DIÁRIO AUTOMÁTICO A PARTIR DO JSON SE NÃO HOUVER EXCEL DE LOJA
+                df_desp_filtered['Dia'] = df_desp_filtered['Vencimento_dt'].dt.day
+                dias_mes = sorted([int(d) for d in df_desp_filtered['Dia'].dropna().unique() if d > 0])
+                piv_ent = pd.Series(0.0, index=dias_mes)
+                piv_sai = df_desp_filtered[df_desp_filtered['Status_Clean'] == 'REALIZADO'].groupby('Dia')['Valor'].sum()
+                piv_sal = pd.Series(0.0, index=dias_mes)
+                
+            row_e, row_s, row_liq, row_acum = {}, {}, {}, {}
+            
+            for d in dias_mes:
+                e = piv_ent.get(d, 0.0)
+                s = piv_sai.get(d, 0.0)
+                l = e - s
+                sal = piv_sal.get(d, 0.0)
+                
+                row_e[d] = e
+                row_s[d] = s
+                row_liq[d] = l
+                row_acum[d] = sal
+                
+            df_extrato_diario = pd.DataFrame([
+                {"Linha de Extrato": "1. (+) Total Entradas", **row_e},
+                {"Linha de Extrato": "2. (-) Total Saídas", **row_s},
+                {"Linha de Extrato": "3. (=) Resultado Líquido do Dia", **row_liq},
+                {"Linha de Extrato": "4. 🏦 SALDO EM CONTA BANCÁRIA", **row_acum}
+            ])
+            
+            cols_order = ["Linha de Extrato"] + dias_mes
+            st.dataframe(
+                df_extrato_diario[cols_order].style.format({d: "R$ {:,.2f}" for d in dias_mes}),
+                use_container_width=True,
+                hide_index=True
+            )
             
         with tab3:
             st.subheader("Matriz Comparativa entre Lojas")
