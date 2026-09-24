@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import requests
 
 # ---------------------------------------------------------
 # CONFIGURAÇÃO DA PÁGINA E TEMA BORELLI
@@ -41,8 +42,32 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# TOKEN API F360
+F360_TOKEN = "11001cbb-792d-45e5-b2f9-03ffc46fe7ed"
+
 # ---------------------------------------------------------
-# FUNÇÕES DE PROCESSAMENTO
+# CONEXÃO COM API PÚBLICA F360
+# ---------------------------------------------------------
+def buscar_dados_f360(token):
+    url_base = "https://financas.f360.com.br"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "token": token,
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        # Teste de Conexão no endpoint de Empresas/Titulos
+        response = requests.get(f"{url_base}/EmpresasPublicAPI/ObterEmpresas", headers=headers, timeout=10)
+        if response.status_code == 200:
+            return True, response.json()
+        else:
+            return False, f"Status Code: {response.status_code} - {response.text}"
+    except Exception as e:
+        return False, str(e)
+
+# ---------------------------------------------------------
+# FUNÇÕES DE PROCESSAMENTO DE PLANILHAS
 # ---------------------------------------------------------
 def categorizar_plano_contas(plano):
     if pd.isna(plano):
@@ -69,7 +94,6 @@ def categorizar_plano_contas(plano):
 def processar_fluxo_caixa_loja(file, nome_loja):
     xls = pd.ExcelFile(file)
     sheet_name = 'Fluxo de Caixa' if 'Fluxo de Caixa' in xls.sheet_names else xls.sheet_names[0]
-    
     df_raw = pd.read_excel(file, sheet_name=sheet_name)
     
     header_row = None
@@ -86,13 +110,11 @@ def processar_fluxo_caixa_loja(file, nome_loja):
         df = df_raw.copy()
         
     df.columns = [str(c).strip() for c in df.columns]
-    
     df['Vencimento_dt'] = pd.to_datetime(df['Data'], errors='coerce')
     df = df.dropna(subset=['Vencimento_dt']).copy()
     df['Dia'] = df['Vencimento_dt'].dt.day
     
     cols_total = [i for i, col in enumerate(df.columns) if col == 'Total']
-    
     if len(cols_total) >= 2:
         df['Entradas'] = pd.to_numeric(df.iloc[:, cols_total[0]], errors='coerce').fillna(0)
         df['Saídas'] = pd.to_numeric(df.iloc[:, cols_total[1]], errors='coerce').fillna(0)
@@ -102,13 +124,11 @@ def processar_fluxo_caixa_loja(file, nome_loja):
 
     df['Saldo_Banco'] = pd.to_numeric(df['Saldo'], errors='coerce').fillna(0)
     df['Empresa'] = nome_loja
-    
     return df
 
 @st.cache_data(ttl=3600)
 def processar_arquivo_despesas(file):
     df_raw = pd.read_excel(file)
-    
     header_idx = None
     for idx, row in df_raw.iterrows():
         row_str = " ".join(row.dropna().astype(str))
@@ -123,8 +143,6 @@ def processar_arquivo_despesas(file):
         df = df_raw.copy()
         
     df = df[df['Tipo'].astype(str).str.contains('A Pagar|Pagar', case=False, na=False)].copy()
-    
-    # Desconsiderar títulos cancelados ou baixados
     status_invalidos = ['cancelado', 'baixado']
     df = df[~df['Status'].astype(str).str.lower().apply(lambda x: any(s in x for s in status_invalidos))].copy()
     
@@ -146,6 +164,19 @@ st.markdown("<div class='main-subtitle'>Acompanhamento de liquidez, governança 
 
 # BARRA LATERAL
 with st.sidebar:
+    st.header("⚡ Integração F360 API")
+    usar_api_f360 = st.toggle("Usar API F360 (Tempo Real)", value=False)
+    
+    if usar_api_f360:
+        st.info(f"🔑 Chave API: `{F360_TOKEN[:8]}...`")
+        if st.button("🔄 Testar Conexão F360"):
+            status_ok, msg = buscar_dados_f360(F360_TOKEN)
+            if status_ok:
+                st.success("Conexão estabelecida com sucesso!")
+            else:
+                st.warning(f"Resposta da API F360: {msg}")
+    
+    st.divider()
     st.header("📥 Relatório ERP (Despesas)")
     uploaded_file = st.file_uploader("Anexe o Rateio de Títulos (.xlsx)", type=["xlsx", "xls"])
     
@@ -165,7 +196,6 @@ if uploaded_file is not None:
     try:
         df_desp = processar_arquivo_despesas(uploaded_file)
         
-        # Processar Fluxos das Lojas
         dfs_lojas = []
         if file_pantanal is not None:
             dfs_lojas.append(processar_fluxo_caixa_loja(file_pantanal, "4- PANTANAL"))
@@ -179,7 +209,6 @@ if uploaded_file is not None:
         min_date = df_desp['Vencimento_dt'].min().date() if not df_desp['Vencimento_dt'].isnull().all() else pd.to_datetime('today').date()
         max_date = df_desp['Vencimento_dt'].max().date() if not df_desp['Vencimento_dt'].isnull().all() else pd.to_datetime('today').date()
 
-        # FILTROS SUPERIORES
         col_filtro1, col_filtro2 = st.columns([2, 1])
         
         with col_filtro1:
@@ -198,7 +227,6 @@ if uploaded_file is not None:
                 format="DD/MM/YYYY"
             )
 
-        # Filtragem
         df_desp_filtered = df_desp.copy()
         df_lojas_filtered = df_lojas_concat.copy()
         
@@ -221,11 +249,9 @@ if uploaded_file is not None:
 
         st.divider()
 
-        # Separar Despesas Operacionais dos Mútuos
         df_desp_operacional = df_desp_filtered[df_desp_filtered['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"].copy()
         df_desp_mutuo = df_desp_filtered[df_desp_filtered['Categoria_CFO'] == "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"].copy()
 
-        # CÁLCULO DOS KPIS DE EXTRATO BANCO
         tot_entradas_loja = df_lojas_filtered['Entradas'].sum() if not df_lojas_filtered.empty else 0.0
         tot_previsto = df_desp_operacional['Valor'].sum()
         tot_realizado = df_desp_operacional[df_desp_operacional['Status_Clean'] == 'REALIZADO']['Valor'].sum()
@@ -239,7 +265,6 @@ if uploaded_file is not None:
 
         st.caption("👇 **Clique nos botões para filtrar os títulos na tabela inferior:**")
 
-        # KPIS
         k1, k2, k3, k4 = st.columns(4)
 
         with k1:
@@ -260,7 +285,6 @@ if uploaded_file is not None:
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # 1. VISÕES CONSOLIDADAS
         tab1, tab2, tab3 = st.tabs(["📋 DRE de Caixa", "📅 Fluxo Diário (Extrato Banco)", "🏪 Comparativo Por Loja"])
         
         with tab1:
@@ -309,7 +333,6 @@ if uploaded_file is not None:
                 "% do Total": f"{(res_operacional_real / tot_entradas_loja * 100) if tot_entradas_loja > 0 else 0:.1f}%"
             })
             
-            # Linha Mútuo Intercompany
             p_mutuo = df_desp_mutuo['Valor'].sum()
             r_mutuo = tot_mutuo_realizado
             dre_list.append({
@@ -320,7 +343,6 @@ if uploaded_file is not None:
                 "% do Total": f"{(p_mutuo / tot_entradas_loja * 100) if tot_entradas_loja > 0 else 0:.1f}%"
             })
             
-            # Geração Final
             res_final_prev = res_operacional_prev - p_mutuo
             res_final_real = res_operacional_real - r_mutuo
             dre_list.append({
@@ -381,7 +403,6 @@ if uploaded_file is not None:
 
         st.divider()
 
-        # 2. DETALHAMENTO DOS TÍTULOS
         if st.session_state.filtro_kpi == "REALIZADO":
             df_titulos = df_desp_filtered[df_desp_filtered['Status_Clean'] == 'REALIZADO'].copy()
             titulo_tabela = f"🟢 Exibindo {len(df_titulos)} Títulos LIQUIDADOS (R$ {tot_realizado:,.2f})"
