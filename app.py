@@ -53,88 +53,105 @@ LOJAS_CNPJ = {
 }
 
 # ---------------------------------------------------------
-# CONEXÃO E REQUISIÇÕES COM CNPJ F360
+# CONEXÃO F360 CONFORME DOCUMENTAÇÃO POSTMAN OFICIAL
 # ---------------------------------------------------------
 @st.cache_data(ttl=300)
-def obter_jwt_token_f360(token):
+def realizar_login_f360(token_api):
     url_login = "https://financas.f360.com.br/PublicLoginAPI/DoLogin"
     headers = {"Content-Type": "application/json"}
-    payload = {"token": token}
+    payload = {"token": token_api}
     try:
         r = requests.post(url_login, json=payload, headers=headers, timeout=10)
         if r.status_code == 200:
             res_data = r.json()
-            jwt = res_data.get("Token") or res_data.get("Result") or res_data.get("token")
-            return jwt if jwt else res_data
-        return None
+            # O F360 pode retornar o token de sessão direto na raiz ou num objeto Result
+            if isinstance(res_data, dict):
+                return res_data.get("Token") or res_data.get("Result") or res_data.get("token") or token_api
+            elif isinstance(res_data, str):
+                return res_data
+        return token_api
     except:
-        return None
+        return token_api
 
-def consultar_f360_com_cnpjs(jwt_token, path_endpoint, data_ini, data_fim):
+def consultar_endpoint_postman(session_token, path_endpoint, payload=None):
+    url_base = "https://financas.f360.com.br"
+    url_completa = f"{url_base}{path_endpoint}"
+    
+    # Headers oficiais de sessão segundo especificação do Postman F360
     headers = {
-        "Authorization": f"Bearer {jwt_token}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "token": str(session_token),
+        "Authorization": str(session_token)
     }
     
-    cnpjs_formatados = [info["cnpj"] for info in LOJAS_CNPJ.values()]
-    cnpjs_limpos = [info["clean"] for info in LOJAS_CNPJ.values()]
-    
-    # Estruturas de payload aceitas pelo F360
-    payloads_teste = [
-        {
-            "DataInicio": data_ini,
-            "DataFim": data_fim,
-            "CNPJ": cnpjs_formatados[0],
-            "Cnpjs": cnpjs_formatados
-        },
-        {
-            "DataInicial": data_ini,
-            "DataFinal": data_fim,
-            "Cnpj": cnpjs_limpos[0],
-            "Cnpjs": cnpjs_limpos
-        },
-        {
-            "dataInicio": data_ini,
-            "dataFim": data_fim,
-            "cnpj": cnpjs_limpos[0]
-        }
-    ]
-    
-    base_urls = [
-        "https://financas.f360.com.br",
-        "https://financas.f360.com.br/PublicAPI"
-    ]
-    
-    for base in base_urls:
-        url = f"{base}{path_endpoint}"
-        for p in payloads_teste:
-            try:
-                r = requests.post(url, json=p, headers=headers, timeout=6)
-                if r.status_code in [200, 201]:
-                    res = r.json()
-                    qtd = len(res) if isinstance(res, list) else 1
-                    return True, f"🟢 Conectado ({qtd} registros)", res
-            except:
-                continue
-                
-    return False, "🔴 Rota/CNPJ não retornou dados (404/Sem dados)", None
+    try:
+        if payload:
+            r = requests.post(url_completa, json=payload, headers=headers, timeout=8)
+        else:
+            r = requests.get(url_completa, headers=headers, timeout=8)
+            
+        if r.status_code in [200, 201]:
+            res = r.json()
+            qtd = len(res) if isinstance(res, list) else 1
+            return True, f"🟢 Conectado em {path_endpoint} ({qtd} registros)", res
+        else:
+            return False, f"HTTP {r.status_code} ({path_endpoint})", None
+    except Exception as e:
+        return False, f"Erro: {str(e)}", None
 
-def diagnosticar_modulos_f360(jwt_token):
+def diagnosticar_modulos_f360(session_token):
     status_diag = {}
-    data_ini = "2026-09-01"
-    data_fim = "2026-09-30"
     
-    # 1. Rateio / Títulos
-    ok_t, msg_t, data_t = consultar_f360_com_cnpjs(jwt_token, "/TitulosPublicAPI/ObterTitulos", data_ini, data_fim)
-    status_diag["titulos"] = {"ok": ok_t, "msg": msg_t, "data": data_t}
+    # Payload no padrão de formato de datas da API F360
+    payload_datas = {
+        "DataInicio": "2026-09-01",
+        "DataFim": "2026-09-30",
+        "Cnpjs": [info["cnpj"] for info in LOJAS_CNPJ.values()]
+    }
+    
+    # 1. Testar Rotas de Títulos (Rateio / A Pagar)
+    rotas_titulos = [
+        "/PublicRelatorioAPI/GerarRelatorioTitulos",
+        "/TitulosPublicAPI/ObterTitulos",
+        "/PublicAPI/TitulosPublicAPI/ObterTitulos"
+    ]
+    ok_t = False
+    for r in rotas_titulos:
+        ok_t, msg_t, data_t = consultar_endpoint_postman(session_token, r, payload_datas)
+        if ok_t:
+            status_diag["titulos"] = {"ok": True, "msg": msg_t, "data": data_t}
+            break
+    if not ok_t:
+        status_diag["titulos"] = {"ok": False, "msg": "🔴 Rota de Títulos não respondeu 200"}
 
-    # 2. Extrato / Caixas
-    ok_c, msg_c, data_c = consultar_f360_com_cnpjs(jwt_token, "/CaixasPublicAPI/ObterCaixas", data_ini, data_fim)
-    status_diag["caixas"] = {"ok": ok_c, "msg": msg_c, "data": data_c}
+    # 2. Testar Rotas de Caixas / Extrato
+    rotas_caixas = [
+        "/CaixasPublicAPI/ObterCaixas",
+        "/PublicRelatorioAPI/GerarRelatorioExtrato",
+        "/PublicAPI/CaixasPublicAPI/ObterCaixas"
+    ]
+    ok_c = False
+    for r in rotas_caixas:
+        ok_c, msg_c, data_c = consultar_endpoint_postman(session_token, r, payload_datas)
+        if ok_c:
+            status_diag["caixas"] = {"ok": True, "msg": msg_c, "data": data_c}
+            break
+    if not ok_c:
+        status_diag["caixas"] = {"ok": False, "msg": "🔴 Rota de Caixas não respondeu 200"}
 
-    # 3. Empresas / Lojas
-    ok_e, msg_e, data_e = consultar_f360_com_cnpjs(jwt_token, "/EmpresasPublicAPI/ObterEmpresas", data_ini, data_fim)
-    status_diag["empresas"] = {"ok": ok_e, "msg": msg_e, "data": data_e}
+    # 3. Testar Rotas de Empresas / Cadastro Lojas
+    rotas_empresas = [
+        "/EmpresasPublicAPI/ObterEmpresas",
+        "/PublicAPI/EmpresasPublicAPI/ObterEmpresas"
+    ]
+    ok_e = False
+    for r in rotas_empresas:
+        ok_e, msg_e, data_e = consultar_endpoint_postman(session_token, r)
+        if ok_e:
+            status_diag["empresas"] = {"ok": True, "msg": msg_e, "data": data_e}
+            break
+    if not ok_e:
+        status_diag["empresas"] = {"ok": False, "msg": "🔴 Rota de Empresas não respondeu 200"}
 
     return status_diag
 
@@ -239,13 +256,13 @@ with st.sidebar:
     st.header("⚡ Integração F360 API")
     usar_api_f360 = st.toggle("Usar API F360 (Tempo Real)", value=False)
     
-    jwt_sessao = None
+    token_sessao = None
     if usar_api_f360:
-        jwt_sessao = obter_jwt_token_f360(F360_TOKEN)
-        if jwt_sessao:
-            st.success("🟢 Sessão JWT Ativa na F360!")
-            st.caption("📋 **Mapeamento por CNPJ das Lojas:**")
-            diag = diagnosticar_modulos_f360(jwt_sessao)
+        token_sessao = realizar_login_f360(F360_TOKEN)
+        if token_sessao:
+            st.success("🟢 Sessão Válida na F360!")
+            st.caption("📋 **Mapeamento Postman F360:**")
+            diag = diagnosticar_modulos_f360(token_sessao)
             
             st.write(f"• **Rateio/Pagar:** {diag['titulos']['msg']}")
             st.write(f"• **Extrato/Caixa:** {diag['caixas']['msg']}")
