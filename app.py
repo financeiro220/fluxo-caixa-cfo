@@ -52,8 +52,10 @@ MAPA_CNPJ_LOJA = {
     "36.240.923/0003-20": "8 - GOIABEIRAS"
 }
 
+LOJAS_CNPJ_LISTA = list(MAPA_CNPJ_LOJA.keys())
+
 # ---------------------------------------------------------
-# AUTENTICAÇÃO E BUSCA DIRETA DE VENCIMENTOS F360
+# AUTENTICAÇÃO E API F360
 # ---------------------------------------------------------
 def autenticar_f360(token_api):
     url = "https://financas.f360.com.br/PublicLoginAPI/DoLogin"
@@ -69,6 +71,33 @@ def autenticar_f360(token_api):
         return None
     except:
         return None
+
+def solicitar_relatorio_f360(jwt_token, d_inicio, d_fim):
+    url = "https://financas.f360.com.br/PublicRelatorioAPI/GerarRelatorio"
+    headers = {
+        "Authorization": f"Bearer {jwt_token}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "Data": d_inicio.strftime("%Y-%m-%d"),
+        "Fim": d_fim.strftime("%Y-%m-%d"),
+        "ModeloContabil": "provisao",
+        "ModeloRelatorio": "gerencial",
+        "ExtensaoDeArquivo": "json",
+        "EnviarNotificacaoPorWebhook": False,
+        "URLNotificaticao": "",
+        "Contas": "",
+        "CNPJEmpresas": LOJAS_CNPJ_LISTA
+    }
+    try:
+        r = requests.post(url, json=payload, headers=headers, timeout=10)
+        if r.status_code == 200:
+            res = r.json()
+            rel_id = res.get("Result", "Solicitado") if isinstance(res, dict) else "Solicitado"
+            return True, f"🟢 Relatório F360 solicitado na API! (ID: {rel_id})"
+        return False, f"HTTP {r.status_code}: {r.text[:100]}"
+    except Exception as e:
+        return False, f"Erro na requisição: {str(e)}"
 
 def categorizar_plano_contas(plano):
     if pd.isna(plano):
@@ -92,8 +121,47 @@ def categorizar_plano_contas(plano):
         return "5. DESPESAS OPERACIONAIS & VENDAS"
 
 # ---------------------------------------------------------
-# LEITURA DE EXCEL (RATEIO DE TÍTULOS COM VENCIMENTO REAL)
+# PROCESSADOR DO JSON F360 (MAPEAMENTO CORRETO DE DATAS)
 # ---------------------------------------------------------
+def processar_json_f360(data_json):
+    df = pd.DataFrame(data_json)
+    
+    df['Valor'] = pd.to_numeric(df['ValorLcto'], errors='coerce').fillna(0)
+    df['Plano de Contas'] = df['NomePlanoDeContas'].fillna('Outros')
+    
+    df['Status_Clean'] = df['StatusTitulo'].astype(str).apply(
+        lambda x: "REALIZADO" if any(s in str(x).lower() for s in ['liquidado', 'conciliado']) else "PENDENTE"
+    )
+    
+    # DATAS: Prioriza DataDoLcto (Data real do agendamento do título no F360) ou Liquidacao se pago
+    def extrair_vencimento(row):
+        if row['Status_Clean'] == 'REALIZADO' and pd.notna(row.get('Liquidacao')):
+            dt_l = pd.to_datetime(row['Liquidacao'], errors='coerce')
+            if pd.notna(dt_l):
+                return dt_l.tz_localize(None) if dt_l.tz is not None else dt_l
+        
+        dt_lcto = pd.to_datetime(row.get('DataDoLcto'), format='%d/%m/%Y', errors='coerce')
+        if pd.notna(dt_lcto):
+            return dt_lcto
+            
+        return pd.to_datetime(row.get('DataCompetencia'), format='%d/%m/%Y', errors='coerce')
+
+    df['Vencimento_dt'] = df.apply(extrair_vencimento, axis=1)
+    df = df.dropna(subset=['Vencimento_dt']).copy()
+    
+    df['Vencimento_dt'] = pd.to_datetime(df['Vencimento_dt'])
+    df['Dia'] = df['Vencimento_dt'].dt.day
+    
+    df['Empresa'] = df['CNPJEmpresa'].map(MAPA_CNPJ_LOJA).fillna(df['CNPJEmpresa'])
+    df['Categoria_CFO'] = df['Plano de Contas'].apply(categorizar_plano_contas)
+    df['Cliente / Fornecedor'] = df['ComplemHistorico'].astype(str).apply(lambda x: x.split('-')[0].strip() if '-' in x else x[:30])
+    df['Número'] = df['NumeroTitulo'].fillna('')
+    
+    # Filtrar cancelados e baixados
+    df = df[~df['StatusTitulo'].astype(str).str.lower().str.contains('cancelado|baixado', na=False)].copy()
+    
+    return df
+
 @st.cache_data(ttl=3600)
 def processar_arquivo_despesas(file):
     df_raw = pd.read_excel(file)
@@ -177,12 +245,21 @@ with st.sidebar:
         jwt_token = autenticar_f360(F360_TOKEN)
         if jwt_token:
             st.success("🟢 Sessão JWT Válida!")
+            if st.button("🚀 Solicitar Relatório F360"):
+                d_ini = date(2026, 9, 1)
+                d_fim = date(2026, 9, 30)
+                ok_sol, msg_sol = solicitar_relatorio_f360(jwt_token, d_ini, d_fim)
+                if ok_sol:
+                    st.info(msg_sol)
+                else:
+                    st.error(msg_sol)
         else:
             st.error("🔴 Falha na autenticação JWT F360")
             
     st.divider()
-    st.header("📥 Relatório ERP (Despesas / Rateio)")
-    uploaded_file = st.file_uploader("Anexe o Rateio de Títulos em Excel (.xlsx)", type=["xlsx", "xls"])
+    st.header("📥 Relatório ERP / F360")
+    json_f360_file = st.file_uploader("Anexe o Ficheiro JSON F360 (.json)", type=["json"])
+    uploaded_file = st.file_uploader("OU Anexe o Rateio em Excel (.xlsx)", type=["xlsx", "xls"])
     
     st.divider()
     st.header("🍦 Fluxo de Caixa Por Loja")
@@ -196,10 +273,17 @@ if 'filtro_kpi' not in st.session_state:
 # RENDERIZAÇÃO
 df_desp = None
 
-if uploaded_file is not None:
+if json_f360_file is not None:
+    try:
+        data_j = json.load(json_f360_file)
+        df_desp = processar_json_f360(data_j)
+        st.sidebar.success(f"🟢 JSON F360 Carregado com {len(df_desp)} títulos!")
+    except Exception as e:
+        st.sidebar.error(f"Erro ao ler JSON F360: {e}")
+elif uploaded_file is not None:
     try:
         df_desp = processar_arquivo_despesas(uploaded_file)
-        st.sidebar.success(f"🟢 Rateio de Títulos Carregado com {len(df_desp)} lançamentos!")
+        st.sidebar.success(f"🟢 Rateio Excel Carregado com {len(df_desp)} lançamentos!")
     except Exception as e:
         st.sidebar.error(f"Erro ao ler Excel: {e}")
 
@@ -227,7 +311,7 @@ if df_desp is not None and not df_desp.empty:
             loja_selecionada = st.radio("", lojas_opcoes, horizontal=True)
 
         with col_filtro2:
-            st.caption("📅 **Período de Vencimento Real:**")
+            st.caption("📅 **Período de Vencimento:**")
             date_range = st.date_input(
                 "",
                 value=(min_date, max_date),
@@ -444,7 +528,7 @@ else:
         <h3>🍦 Painel de Fluxo de Caixa Executivo - Gelateria Borelli</h3>
         <p>Aguardando carga dos relatórios no menu lateral para inicializar o processamento.</p>
         <ol>
-            <li>Anexe o arquivo de despesas no menu lateral <b>(📥 Relatório ERP - Rateio de Títulos em Excel)</b>.</li>
+            <li>Anexe o ficheiro <b>JSON gerado no F360 (.json)</b> OU o Excel de rateio <b>(📥 Relatório ERP)</b>.</li>
             <li>Anexe o arquivo <b>Fluxo de Caixa Pantanal / Lojas</b>.</li>
         </ol>
     </div>
