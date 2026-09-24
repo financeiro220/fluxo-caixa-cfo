@@ -49,22 +49,32 @@ F360_TOKEN = "11001cbb-792d-45e5-b2f9-03ffc46fe7ed"
 # CONEXÃO COM API PÚBLICA F360
 # ---------------------------------------------------------
 def buscar_dados_f360(token):
-    url_base = "https://financas.f360.com.br"
     headers = {
         "Authorization": f"Bearer {token}",
         "token": token,
         "Content-Type": "application/json"
     }
     
-    try:
-        # Teste de Conexão no endpoint de Empresas/Titulos
-        response = requests.get(f"{url_base}/EmpresasPublicAPI/ObterEmpresas", headers=headers, timeout=10)
-        if response.status_code == 200:
-            return True, response.json()
-        else:
-            return False, f"Status Code: {response.status_code} - {response.text}"
-    except Exception as e:
-        return False, str(e)
+    endpoints_teste = [
+        "https://financas.f360.com.br/PublicAPI/Empresas",
+        "https://financas.f360.com.br/PublicAPI/ObterEmpresas",
+        "https://financas.f360.com.br/api/v1/empresas",
+        "https://api.f360financas.com.br/v1/empresas",
+        "https://financas.f360.com.br/PublicAPI/Titulos"
+    ]
+    
+    resultados = []
+    for url in endpoints_teste:
+        try:
+            r = requests.get(url, headers=headers, timeout=5)
+            if r.status_code in [200, 201]:
+                return True, f"✅ Rota encontrada com sucesso! ({url}) - Resposta: {r.text[:100]}"
+            else:
+                resultados.append(f"URL: {url} | Code: {r.status_code}")
+        except Exception as e:
+            resultados.append(f"URL: {url} | Erro: {str(e)}")
+            
+    return False, " / ".join(resultados)
 
 # ---------------------------------------------------------
 # FUNÇÕES DE PROCESSAMENTO DE PLANILHAS
@@ -173,6 +183,7 @@ with st.sidebar:
             status_ok, msg = buscar_dados_f360(F360_TOKEN)
             if status_ok:
                 st.success("Conexão estabelecida com sucesso!")
+                st.write(msg)
             else:
                 st.warning(f"Resposta da API F360: {msg}")
     
