@@ -46,35 +46,45 @@ st.markdown("""
 F360_TOKEN = "11001cbb-792d-45e5-b2f9-03ffc46fe7ed"
 
 # ---------------------------------------------------------
-# CONEXÃO COM API PÚBLICA F360
+# CONEXÃO E AUTENTICAÇÃO OFICIAL F360 (LOGIN VIA POST)
 # ---------------------------------------------------------
-def buscar_dados_f360(token):
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "token": token,
-        "Content-Type": "application/json"
-    }
+def autenticar_e_buscar_f360(token):
+    url_login = "https://financas.f360.com.br/PublicLoginAPI/DoLogin"
+    headers = {"Content-Type": "application/json"}
+    payload = {"token": token}
     
-    endpoints_teste = [
-        "https://financas.f360.com.br/PublicAPI/Empresas",
-        "https://financas.f360.com.br/PublicAPI/ObterEmpresas",
-        "https://financas.f360.com.br/api/v1/empresas",
-        "https://api.f360financas.com.br/v1/empresas",
-        "https://financas.f360.com.br/PublicAPI/Titulos"
-    ]
-    
-    resultados = []
-    for url in endpoints_teste:
-        try:
-            r = requests.get(url, headers=headers, timeout=5)
-            if r.status_code in [200, 201]:
-                return True, f"✅ Rota encontrada com sucesso! ({url}) - Resposta: {r.text[:100]}"
-            else:
-                resultados.append(f"URL: {url} | Code: {r.status_code}")
-        except Exception as e:
-            resultados.append(f"URL: {url} | Erro: {str(e)}")
+    try:
+        # Step 1: Executar DoLogin
+        r_login = requests.post(url_login, json=payload, headers=headers, timeout=10)
+        
+        if r_login.status_code == 200:
+            res_data = r_login.json()
+            jwt_token = res_data.get("Token") or res_data.get("Result") or res_data.get("token")
             
-    return False, " / ".join(resultados)
+            if not jwt_token and isinstance(res_data, str):
+                jwt_token = res_data
+                
+            if jwt_token:
+                # Step 2: Testar consulta usando o JWT retornado
+                auth_headers = {
+                    "Authorization": f"Bearer {jwt_token}",
+                    "Content-Type": "application/json"
+                }
+                
+                url_titulos = "https://financas.f360.com.br/PublicAPI/TitulosPublicAPI/ObterTitulos"
+                r_titulos = requests.get(url_titulos, headers=auth_headers, timeout=10)
+                
+                if r_titulos.status_code == 200:
+                    return True, "✅ Autenticação realizada com sucesso e dados de títulos retornados!"
+                else:
+                    return True, f"✅ Login realizado com sucesso! (Status Titulos: {r_titulos.status_code})"
+            else:
+                return False, f"Login aceito mas token JWT não retornado: {r_login.text[:150]}"
+        else:
+            return False, f"Falha no DoLogin | Status: {r_login.status_code} | Resposta: {r_login.text[:150]}"
+            
+    except Exception as e:
+        return False, f"Erro de Conexão com F360: {str(e)}"
 
 # ---------------------------------------------------------
 # FUNÇÕES DE PROCESSAMENTO DE PLANILHAS
@@ -180,12 +190,12 @@ with st.sidebar:
     if usar_api_f360:
         st.info(f"🔑 Chave API: `{F360_TOKEN[:8]}...`")
         if st.button("🔄 Testar Conexão F360"):
-            status_ok, msg = buscar_dados_f360(F360_TOKEN)
+            status_ok, msg = autenticar_e_buscar_f360(F360_TOKEN)
             if status_ok:
                 st.success("Conexão estabelecida com sucesso!")
                 st.write(msg)
             else:
-                st.warning(f"Resposta da API F360: {msg}")
+                st.warning(f"Resultado do Teste F360: {msg}")
     
     st.divider()
     st.header("📥 Relatório ERP (Despesas)")
