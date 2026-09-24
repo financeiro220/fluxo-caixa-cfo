@@ -1,5 +1,5 @@
 """
-f360_api.py - Módulo F360 modular para busca de Parcelas de Despesas e Fluxo de Receitas.
+f360_api.py - Captura completa do Fluxo de Caixa (Cartões + Outros/Boletos + Despesas)
 """
 import requests
 import pandas as pd
@@ -8,6 +8,8 @@ from datetime import datetime, date, timedelta
 
 BASE = "https://financas.f360.com.br"
 JANELA_DIAS = 30
+
+IDS_CONTAS_BORELLI = ["17", "51", "61"]
 
 def autenticar_f360(token_api):
     try:
@@ -40,6 +42,59 @@ def _fmt_cnpj(c):
     d = _so_digitos(c)
     return f"{d[:2]}.{d[2:5]}.{d[5:8]}/{d[8:12]}-{d[12:]}" if len(d) == 14 else str(c)
 
+def buscar_extrato_cartoes_f360(jwt, d_ini, d_fim, log=None):
+    """
+    Busca o extrato das liquidações de cartões e movimentações de entrada
+    das contas 17, 51 e 61 no F360.
+    """
+    log = log if log is not None else []
+    headers = {"Authorization": f"Bearer {jwt}", "Content-Type": "application/json"}
+    
+    # Endpoint de extrato bancário / liquidação de cartões
+    url = f"{BASE}/ExtratoBancarioPublicAPI/ObterExtratoBancario"
+    
+    payload = {
+        "DataInicio": d_ini.strftime("%Y-%m-%d"),
+        "DataFim": d_fim.strftime("%Y-%m-%d"),
+        "ContasBancarias": IDS_CONTAS_BORELLI
+    }
+    
+    entradas_cartoes = []
+    try:
+        r = requests.post(url, json=payload, headers=headers, timeout=30)
+        if r.status_code == 200:
+            res = r.json()
+            itens = res.get("Result", []) if isinstance(res, dict) else res
+            log.append(f"Extrato Bancário / Cartões: {len(itens)} lançamentos de movimentação encontrados")
+            
+            for item in itens:
+                val = float(item.get("Valor") or 0.0)
+                # Seleciona apenas os créditos/entradas
+                if val > 0 or str(item.get("TipoMovimento", "")).lower() in ["credito", "crédito", "entrada"]:
+                    dt_mov = pd.to_datetime(item.get("Data") or item.get("DataMovimento") or item.get("DataLiquidacao"), errors='coerce')
+                    conta_nome = str(item.get("ContaBancaria") or item.get("NomeConta") or "")
+                    
+                    empresa = "4- PANTANAL" if "17" in conta_nome else ("5- ESTAÇÃO" if "51" in conta_nome else "8 - GOIABEIRAS")
+                    
+                    entradas_cartoes.append({
+                        "ParcelaId": f"EXTRATO_{item.get('Id') or dt_mov}",
+                        "Número": "EXTRATO / CARTÃO",
+                        "Tipo_Movimento": "RECEITA",
+                        "Empresa": empresa,
+                        "Cliente / Fornecedor": "LIQUIDAÇÃO DE CARTÕES / VENDAS",
+                        "Plano de Contas": "Receita de Vendas (Cartões)",
+                        "Valor": abs(val),
+                        "Status": "Liquidado",
+                        "Status_Clean": "REALIZADO",
+                        "Vencimento_real": dt_mov,
+                        "Vencimento_dt": dt_mov,
+                        "Dia": dt_mov.day if pd.notna(dt_mov) else 1
+                    })
+    except Exception as e:
+        log.append(f"Consulta de extrato de cartões: {e}")
+        
+    return pd.DataFrame(entradas_cartoes)
+
 def _listar(jwt, tipo, ini, fim, tipo_datas, cnpjs):
     headers = {"Authorization": f"Bearer {jwt}", "Content-Type": "application/json"}
     url = f"{BASE}/ParcelasDeTituloPublicAPI/ListarParcelasDeTitulos"
@@ -48,7 +103,7 @@ def _listar(jwt, tipo, ini, fim, tipo_datas, cnpjs):
     while pagina <= total:
         params = {
             "pagina": pagina,
-            "tipo": tipo,  # Despesa | Receita | Ambos
+            "tipo": tipo,
             "inicio": ini.isoformat(),
             "fim": fim.isoformat(),
             "tipoDatas": tipo_datas,
@@ -93,7 +148,6 @@ def _normaliza(parcelas, mapa_cnpj, tipo_mov_forçado="DESPESA"):
 
         bruto = float(p.get("ValorBruto") or 0)
         
-        # Identificação de Receita vs Despesa
         tipo_item = str(p.get("Tipo") or tit.get("Tipo") or "").lower()
         if "receita" in tipo_item or "receber" in tipo_item:
             tipo_mov = "RECEITA"
@@ -139,8 +193,38 @@ def _normaliza(parcelas, mapa_cnpj, tipo_mov_forçado="DESPESA"):
 
 def buscar_parcelas_f360(jwt, d_ini, d_fim, mapa_cnpj, tipo="Despesa",
                          incluir_liquidacao=True, progresso=None, log=None):
-    """Busca despesas ou receitas na API."""
     log = log if log is not None else []
+    
+    # Se for busca de Receitas, busca tanto títulos de receitas quanto extrato de cartões liquidados
+    if tipo == "Receita":
+        df_cartoes = buscar_extrato_cartoes_f360(jwt, d_ini, d_fim, log=log)
+        
+        digitos = {_so_digitos(c) for c in mapa_cnpj}
+        cnpjs = [_fmt_cnpj(c) for c in mapa_cnpj]
+        tipos_data = ["Vencimento"] + (["Liquidação"] if incluir_liquidacao else [])
+        janelas = list(_janelas(d_ini, d_fim))
+
+        unicas = {}
+        for td in tipos_data:
+            for ini, fim in janelas:
+                try:
+                    itens = _listar(jwt, "Receita", ini, fim, td, cnpjs)
+                    log.append(f"Receitas Titulos {td}: {len(itens)} encontrados")
+                    if not itens:
+                        todos = _listar(jwt, "Receita", ini, fim, td, [])
+                        itens = [p for p in todos if _da_rede(p, digitos)]
+                except Exception as e:
+                    itens = []
+                for p in itens:
+                    unicas[p.get("ParcelaId")] = p
+
+        df_titulos_rec = _normaliza(list(unicas.values()), mapa_cnpj, tipo_mov_forçado="RECEITA")
+        
+        # Junta títulos de receitas com extrato de cartões
+        df_final = pd.concat([df_titulos_rec, df_cartoes], ignore_index=True) if not df_cartoes.empty else df_titulos_rec
+        return df_final
+
+    # Se for busca de Despesas
     digitos = {_so_digitos(c) for c in mapa_cnpj}
     cnpjs = [_fmt_cnpj(c) for c in mapa_cnpj]
     tipos_data = ["Vencimento"] + (["Liquidação"] if incluir_liquidacao else [])
@@ -149,14 +233,13 @@ def buscar_parcelas_f360(jwt, d_ini, d_fim, mapa_cnpj, tipo="Despesa",
     unicas, passo, total = {}, 0, len(janelas) * len(tipos_data)
     for td in tipos_data:
         for ini, fim in janelas:
-            rotulo = f"{tipo} - {td} {ini:%d/%m/%Y} a {fim:%d/%m/%Y}"
+            rotulo = f"Despesas {td} {ini:%d/%m/%Y} a {fim:%d/%m/%Y}"
             try:
                 itens = _listar(jwt, tipo, ini, fim, td, cnpjs)
-                log.append(f"{rotulo}: {len(itens)} itens encontrados")
+                log.append(f"{rotulo}: {len(itens)} despesas encontradas")
                 if not itens:
                     todos = _listar(jwt, tipo, ini, fim, td, [])
                     itens = [p for p in todos if _da_rede(p, digitos)]
-                    log.append(f"   sem filtro de empresas: {len(todos)} itens, {len(itens)} filtrados")
             except Exception as e:
                 log.append(f"{rotulo}: ERRO -> {e}")
                 if td == "Vencimento":
@@ -168,5 +251,4 @@ def buscar_parcelas_f360(jwt, d_ini, d_fim, mapa_cnpj, tipo="Despesa",
             if progresso:
                 progresso(passo / total)
 
-    tipo_mov_forçado = "RECEITA" if tipo == "Receita" else "DESPESA"
-    return _normaliza(list(unicas.values()), mapa_cnpj, tipo_mov_forçado=tipo_mov_forçado)
+    return _normaliza(list(unicas.values()), mapa_cnpj, tipo_mov_forçado="DESPESA")
