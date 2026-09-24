@@ -1,137 +1,178 @@
-import requests
-import pandas as pd
+"""
+f360_api.py - Parcelas de título (com Vencimento e Liquidação) via API pública F360.
+
+Endpoint: GET /ParcelasDeTituloPublicAPI/ListarParcelasDeTitulos
+Limites do F360: 100 itens por página, janela máxima de 31 dias por consulta.
+"""
 import re
-from datetime import datetime, date, timedelta
+from datetime import timedelta
+
+import pandas as pd
+import requests
+
+BASE = "https://financas.f360.com.br"
+JANELA_DIAS = 30  # margem de segurança sobre o limite de 31 dias
+
 
 def autenticar_f360(token_api):
-    """Autentica na F360 e retorna o token JWT de sessão."""
-    url = "https://financas.f360.com.br/PublicLoginAPI/DoLogin"
-    headers = {"Content-Type": "application/json"}
-    payload = {"token": token_api}
     try:
-        r = requests.post(url, json=payload, headers=headers, timeout=10)
+        r = requests.post(
+            f"{BASE}/PublicLoginAPI/DoLogin",
+            json={"token": token_api},
+            headers={"Content-Type": "application/json"},
+            timeout=30,
+        )
         if r.status_code == 200:
             res = r.json()
             if isinstance(res, dict):
                 return res.get("Token") or res.get("Result") or res.get("token")
             return res
-        return None
-    except Exception:
-        return None
+    except requests.RequestException:
+        pass
+    return None
 
-def buscar_parcelas_f360(jwt_token, d_inicio, d_fim, mapa_cnpjs, tipo="Despesa"):
-    """
-    Busca parcelas diretamente via ParcelaDeTituloPublicAPI/ListarParcelasDeTitulos.
-    Realiza paginação, consulta dupla (Vencimento + Liquidação) e aplica rateio proporcional.
-    """
-    url = "https://financas.f360.com.br/ParcelasDeTituloPublicAPI/ListarParcelasDeTitulos"
-    headers = {
-        "Authorization": f"Bearer {jwt_token}",
-        "Content-Type": "application/json"
-    }
-    
-    todas_parcelas = {}
-    tipos_consulta = ["Vencimento", "Liquidacao"]
-    
-    # Executa consulta por Vencimento e por Liquidação para garantir parcelas pagas no mês
-    for t_data in tipos_consulta:
-        pagina = 1
-        tem_mais = True
-        
-        while tem_mais:
-            payload = {
-                "DataInicio": d_inicio.strftime("%Y-%m-%d"),
-                "DataFim": d_fim.strftime("%Y-%m-%d"),
-                "TipoData": t_data,
-                "Pagina": pagina,
-                "ItensPorPagina": 100
-            }
-            
-            try:
-                r = requests.post(url, json=payload, headers=headers, timeout=12)
-                if r.status_code == 200:
-                    res = r.json()
-                    itens = res.get("Result", []) if isinstance(res, dict) else res
-                    if isinstance(itens, list) and len(itens) > 0:
-                        for p in itens:
-                            # Chave única para evitar duplicidades entre a busca por Vencimento e Liquidação
-                            p_id = p.get("ParcelaId") or p.get("Id") or f"{p.get('NumeroTitulo')}_{p.get('ValorBruto')}_{p.get('Vencimento')}"
-                            todas_parcelas[p_id] = p
-                            
-                        if len(itens) < 100:
-                            tem_mais = False
-                        else:
-                            pagina += 1
-                    else:
-                        tem_mais = False
-                else:
-                    tem_mais = False
-            except Exception:
-                tem_mais = False
 
-    registros = []
-    
-    for p in todas_parcelas.values():
-        # Descartar canceladas ou baixadas
-        if p.get("Cancelada") or str(p.get("Status", "")).lower() in ["cancelado", "baixado"]:
+def _janelas(d_ini, d_fim):
+    atual = d_ini
+    while atual <= d_fim:
+        fim = min(atual + timedelta(days=JANELA_DIAS - 1), d_fim)
+        yield atual, fim
+        atual = fim + timedelta(days=1)
+
+
+def _listar(jwt, tipo, ini, fim, tipo_datas, cnpjs):
+    """Percorre todas as páginas de uma janela de até 31 dias."""
+    headers = {"Authorization": f"Bearer {jwt}", "Content-Type": "application/json"}
+    url = f"{BASE}/ParcelasDeTituloPublicAPI/ListarParcelasDeTitulos"
+    pagina, total, saida = 1, 1, []
+    while pagina <= total:
+        params = {
+            "pagina": pagina,
+            "tipo": tipo,  # Despesa | Receita | Ambos
+            "inicio": ini.isoformat(),
+            "fim": fim.isoformat(),
+            "tipoDatas": tipo_datas,
+            "status": "Todos",
+        }
+        if cnpjs:
+            params["empresas"] = ",".join(cnpjs)
+        r = requests.get(url, headers=headers, params=params, timeout=60)
+        if r.status_code != 200:
+            raise RuntimeError(f"HTTP {r.status_code}: {r.text[:300]}")
+        corpo = r.json()
+        if isinstance(corpo, dict) and corpo.get("Ok") is False:
+            raise RuntimeError(f"F360 retornou erro: {str(corpo)[:300]}")
+        res = corpo.get("Result") or {}
+        saida.extend(res.get("Parcelas", []))
+        total = res.get("QuantidadeDePaginas", 1) or 1
+        pagina += 1
+    return saida
+
+
+def _so_digitos(s):
+    return re.sub(r"\D", "", str(s or ""))
+
+
+def _fmt_cnpj(c):
+    """14 dígitos -> 00.000.000/0000-00 (formato usado pelo filtro 'empresas' do F360)."""
+    d = _so_digitos(c)
+    return f"{d[:2]}.{d[2:5]}.{d[5:8]}/{d[8:12]}-{d[12:]}" if len(d) == 14 else str(c)
+
+
+def _da_rede(p, digitos):
+    insc = ((p.get("DadosDoTitulo") or {}).get("Empresa") or {}).get("Inscricao")
+    return _so_digitos(insc) in digitos
+
+
+def _normaliza(parcelas, mapa_cnpj):
+    mapa = {_so_digitos(k): v for k, v in mapa_cnpj.items()}
+    linhas = []
+    for p in parcelas:
+        status = str(p.get("Status", ""))
+        s_low = status.lower()
+        if p.get("Cancelada") or "cancelad" in s_low or "baixad" in s_low:
             continue
-            
-        cnpj_cru = re.sub(r'\D', '', str(p.get("CnpjEmpresa") or p.get("CNPJEmpresa") or ""))
-        empresa_nome = mapa_cnpjs.get(cnpj_cru, cnpj_cru)
-        
-        val_bruto_parcela = float(p.get("ValorBruto") or p.get("Valor") or 0.0)
-        
-        dt_venc = pd.to_datetime(p.get("Vencimento") or p.get("DataVencimento"), errors='coerce')
-        dt_liq = pd.to_datetime(p.get("Liquidacao") or p.get("DataLiquidacao"), errors='coerce')
-        
-        status_st = "REALIZADO" if pd.notna(dt_liq) or any(s in str(p.get("Status", "")).lower() for s in ['liquidado', 'conciliado']) else "PENDENTE"
-        
-        # Data de caixa: Liquidação se pago; Vencimento se pendente
-        dt_caixa = dt_liq if (status_st == "REALIZADO" and pd.notna(dt_liq)) else dt_venc
-        if pd.isna(dt_caixa):
-            dt_caixa = dt_venc if pd.notna(dt_venc) else pd.to_datetime('today')
 
-        # Processamento do Rateio Proporcional
-        rateios = p.get("Rateio") or p.get("Rateios") or []
-        if isinstance(rateios, list) and len(rateios) > 0:
-            tot_rateio = sum([float(r.get("Valor", 0.0)) for r in rateios])
-            tot_rateio = tot_rateio if tot_rateio > 0 else val_bruto_parcela
-            
-            for r in rateios:
-                val_r = float(r.get("Valor", 0.0))
-                prop = (val_r / tot_rateio) if tot_rateio > 0 else (1.0 / len(rateios))
-                val_efetivo = val_bruto_parcela * prop
-                
-                plano_nome = r.get("PlanoDeContas") or r.get("NomePlanoDeContas") or p.get("PlanoDeContas") or "Outros"
-                
-                registros.append({
-                    "Número": p.get("NumeroTitulo") or p.get("Numero") or "",
-                    "Empresa": empresa_nome,
-                    "Cliente / Fornecedor": p.get("NomePessoa") or p.get("Fornecedor") or p.get("Cliente") or "",
-                    "Vencimento_dt": dt_caixa,
-                    "Vencimento_real": dt_venc,
-                    "Valor": val_efetivo,
-                    "Plano de Contas": plano_nome,
-                    "Status_Clean": status_st,
-                    "Dia": dt_caixa.day if pd.notna(dt_caixa) else 1
-                })
-        else:
-            plano_nome = p.get("PlanoDeContas") or "Outros"
-            registros.append({
-                "Número": p.get("NumeroTitulo") or p.get("Numero") or "",
-                "Empresa": empresa_nome,
-                "Cliente / Fornecedor": p.get("NomePessoa") or p.get("Fornecedor") or p.get("Cliente") or "",
-                "Vencimento_dt": dt_caixa,
-                "Vencimento_real": dt_venc,
-                "Valor": val_bruto_parcela,
-                "Plano de Contas": plano_nome,
-                "Status_Clean": status_st,
-                "Dia": dt_caixa.day if pd.notna(dt_caixa) else 1
+        tit = p.get("DadosDoTitulo") or {}
+        cnpj = _so_digitos((tit.get("Empresa") or {}).get("Inscricao"))
+        empresa = mapa.get(cnpj, cnpj or "N/D")
+        fornecedor = (tit.get("ClienteFornecedor") or {}).get("Nome", "") or ""
+        realizado = "liquidado" in s_low or "conciliado" in s_low
+
+        bruto = float(p.get("ValorBruto") or 0)
+        rateio = p.get("Rateio") or [{}]
+        soma = sum(abs(float(r.get("Valor") or 0)) for r in rateio)
+
+        for r in rateio:
+            peso = abs(float(r.get("Valor") or 0)) / soma if soma else 1 / len(rateio)
+            linhas.append({
+                "ParcelaId": p.get("ParcelaId"),
+                "Número": p.get("Numero") or tit.get("NumeroDoTitulo", ""),
+                "Tipo": p.get("Tipo"),
+                "Empresa": empresa,
+                "Cliente / Fornecedor": fornecedor,
+                "Plano de Contas": r.get("PlanoDeContas") or "Outros",
+                "Valor": bruto * peso,
+                "Status": status,
+                "Status_Clean": "REALIZADO" if realizado else "PENDENTE",
+                "Vencimento_real": p.get("Vencimento"),
+                "Liquidacao_raw": p.get("Liquidacao"),
             })
 
-    df = pd.DataFrame(registros)
-    if not df.empty:
-        df['Vencimento_dt'] = pd.to_datetime(df['Vencimento_dt'])
-        if 'Vencimento_real' in df.columns:
-            df['Vencimento_real'] = pd.to_datetime(df['Vencimento_real'])
+    df = pd.DataFrame(linhas)
+    if df.empty:
+        return df
+
+    df["Vencimento_real"] = pd.to_datetime(df["Vencimento_real"], errors="coerce")
+    df["Liquidacao_dt"] = pd.to_datetime(df["Liquidacao_raw"], errors="coerce")
+    df = df.drop(columns=["Liquidacao_raw"])
+
+    # Data de caixa: liquidação se já pago, senão vencimento.
+    # Mantém o nome Vencimento_dt para o restante do app funcionar sem alterações.
+    df["Vencimento_dt"] = df["Liquidacao_dt"].where(
+        (df["Status_Clean"] == "REALIZADO") & df["Liquidacao_dt"].notna(),
+        df["Vencimento_real"],
+    )
+    df = df.dropna(subset=["Vencimento_dt"]).copy()
+    df["Dia"] = df["Vencimento_dt"].dt.day
     return df
+
+
+def buscar_parcelas_f360(jwt, d_ini, d_fim, mapa_cnpj, tipo="Despesa",
+                         incluir_liquidacao=True, progresso=None, log=None):
+    """
+    Retorna DataFrame de parcelas entre d_ini e d_fim (objetos date).
+    Busca por Vencimento e, opcionalmente, por Liquidação (parcelas que venceram
+    em outro mês mas foram pagas dentro do período). `log` (lista) recebe um
+    resumo de cada chamada, útil para diagnóstico.
+    """
+    log = log if log is not None else []
+    digitos = {_so_digitos(c) for c in mapa_cnpj}
+    cnpjs = [_fmt_cnpj(c) for c in mapa_cnpj]
+    tipos_data = ["Vencimento"] + (["Liquidação"] if incluir_liquidacao else [])
+    janelas = list(_janelas(d_ini, d_fim))
+
+    unicas, passo, total = {}, 0, len(janelas) * len(tipos_data)
+    for td in tipos_data:
+        for ini, fim in janelas:
+            rotulo = f"{td} {ini:%d/%m/%Y} a {fim:%d/%m/%Y}"
+            try:
+                itens = _listar(jwt, tipo, ini, fim, td, cnpjs)
+                log.append(f"{rotulo}: {len(itens)} parcelas (filtro de empresas)")
+                if not itens:  # fallback: sem filtro, filtrando localmente
+                    todos = _listar(jwt, tipo, ini, fim, td, [])
+                    itens = [p for p in todos if _da_rede(p, digitos)]
+                    log.append(f"   sem filtro de empresas: {len(todos)} parcelas, "
+                               f"{len(itens)} das suas lojas")
+            except Exception as e:
+                log.append(f"{rotulo}: ERRO -> {e}")
+                if td == "Vencimento":
+                    raise
+                itens = []  # falha na busca por Liquidação não derruba o resto
+            for p in itens:
+                unicas[p.get("ParcelaId")] = p
+            passo += 1
+            if progresso:
+                progresso(passo / total)
+
+    return _normaliza(list(unicas.values()), mapa_cnpj)

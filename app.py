@@ -5,7 +5,7 @@ import json
 import re
 from datetime import datetime, date, timedelta
 
-# IMPORTAÇÃO DO MÓDULO F360
+# IMPORTAÇÃO DO MÓDULO F360 ATUALIZADO
 from f360_api import autenticar_f360, buscar_parcelas_f360
 
 # ---------------------------------------------------------
@@ -46,6 +46,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# TENTATIVA DE RECUPERAR TOKEN DE SECRETS SE EXISTIR
 try:
     F360_TOKEN = st.secrets["F360_TOKEN"]
 except Exception:
@@ -81,8 +82,8 @@ def categorizar_plano_contas(plano):
     else:
         return "5. DESPESAS OPERACIONAIS & VENDAS"
 
-def carregar_api_f360(jwt_token, d_ini, d_fim):
-    df = buscar_parcelas_f360(jwt_token, d_ini, d_fim, MAPA_CNPJ_LOJA, tipo="Despesa")
+def carregar_api_f360(jwt_token, d_ini, d_fim, log=None):
+    df = buscar_parcelas_f360(jwt_token, d_ini, d_fim, MAPA_CNPJ_LOJA, tipo="Despesa", log=log)
     if not df.empty:
         df["Categoria_CFO"] = df["Plano de Contas"].apply(categorizar_plano_contas)
     return df
@@ -195,7 +196,7 @@ def processar_fluxo_caixa_loja(file, nome_loja):
     return df
 
 # ---------------------------------------------------------
-# INTERFACE DO USUÁRIO & SIDEBAR
+# INTERFACE DO USUÁRIO & SIDEBAR (SINCRO COM F360_API.PY)
 # ---------------------------------------------------------
 st.markdown("<div class='main-title'>🍦 Gelateria Borelli - Gestão de Fluxo de Caixa</div>", unsafe_allow_html=True)
 st.markdown("<div class='main-subtitle'>Acompanhamento de liquidez, governança e extrato acumulado diário</div>", unsafe_allow_html=True)
@@ -210,22 +211,37 @@ with st.sidebar:
             
         if st.session_state.jwt:
             st.success("🟢 Sessão JWT válida")
-            hoje = date(2026, 9, 1) # Período atual das franquias
+            hoje = date(2026, 9, 1) # Período base
             periodo_api = st.date_input(
-                "Período de Busca na API", 
+                "Período de Busca", 
                 (hoje.replace(day=1), hoje + timedelta(days=30)), 
                 format="DD/MM/YYYY"
             )
             
-            if st.button("🚀 Buscar parcelas no F360", use_container_width=True) and len(periodo_api) == 2:
-                with st.spinner("Consultando F360 em tempo real..."):
-                    df_resultado = carregar_api_f360(st.session_state.jwt, periodo_api[0], periodo_api[1])
-                    if df_resultado is not None and not df_resultado.empty:
-                        st.session_state.df_api = df_resultado
-                        st.success(f"🟢 {len(df_resultado)} lançamentos carregados!")
-                    else:
-                        st.session_state.df_api = None
-                        st.warning("⚠️ Nenhuma parcela encontrada para este período.")
+            btn_buscar = st.button("🚀 Buscar parcelas no F360", use_container_width=True)
+            
+            if btn_buscar and len(periodo_api) == 2:
+                log = []
+                df_resultado = None
+                try:
+                    with st.spinner("Consultando F360 em tempo real..."):
+                        df_resultado = carregar_api_f360(
+                            st.session_state.jwt, periodo_api[0], periodo_api[1], log
+                        )
+                except Exception as e:
+                    st.error(f"Erro na API F360: {e}")
+                    if "401" in str(e):
+                        st.session_state.jwt = None  # Reautentica no próximo clique
+                
+                if df_resultado is not None and not df_resultado.empty:
+                    st.session_state.df_api = df_resultado
+                    st.success(f"🟢 {len(df_resultado)} lançamentos carregados!")
+                elif df_resultado is not None:
+                    st.session_state.df_api = None
+                    st.warning("⚠️ Nenhuma parcela encontrada para este período.")
+                
+                with st.expander("🔍 Diagnóstico da API"):
+                    st.code("\n".join(log) or "sem chamadas")
         else:
             st.error("🔴 Falha na autenticação F360")
             
