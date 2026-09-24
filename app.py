@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
+import json
 from datetime import datetime, date, timedelta
 
 # ---------------------------------------------------------
@@ -42,23 +43,22 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# TOKEN API F360 E CNPJS DAS UNIDADES
+# TOKEN API F360 E MAPA DE CNPJS
 F360_TOKEN = "11001cbb-792d-45e5-b2f9-03ffc46fe7ed"
 
-LOJAS_CNPJ = [
-    "36.240.923/0001-68", # Pantanal
-    "36.240.923/0002-49", # Estação
-    "36.240.923/0003-20"  # Goiabeiras
-]
+MAPA_CNPJ_LOJA = {
+    "36.240.923/0001-68": "4- PANTANAL",
+    "36.240.923/0002-49": "5- ESTAÇÃO",
+    "36.240.923/0003-20": "8 - GOIABEIRAS"
+}
 
 # ---------------------------------------------------------
-# AUTENTICAÇÃO E CONSULTA INTELIGENTE F360
+# AUTENTICAÇÃO E BUSCA F360
 # ---------------------------------------------------------
 def autenticar_f360(token_api):
     url = "https://financas.f360.com.br/PublicLoginAPI/DoLogin"
     headers = {"Content-Type": "application/json"}
     payload = {"token": token_api}
-    
     try:
         r = requests.post(url, json=payload, headers=headers, timeout=10)
         if r.status_code == 200:
@@ -70,68 +70,6 @@ def autenticar_f360(token_api):
     except:
         return None
 
-def obter_contas_e_empresas_f360(jwt_token):
-    url = "https://financas.f360.com.br/ContaBancariaPublicAPI/ListarContasBancarias"
-    headers = {
-        "Authorization": f"Bearer {jwt_token}",
-        "Content-Type": "application/json"
-    }
-    try:
-        r = requests.get(url, headers=headers, timeout=8)
-        if r.status_code == 200:
-            res = r.json()
-            dados = res.get("Result", []) if isinstance(res, dict) else res
-            return True, dados
-        return False, []
-    except:
-        return False, []
-
-def buscar_parcelas_f360_auto(jwt_token, data_ini, data_fim):
-    headers = {
-        "Authorization": f"Bearer {jwt_token}",
-        "Content-Type": "application/json"
-    }
-    
-    # 1. Pega os dados das contas para extrair IDs internos de empresa se existirem
-    ok_cb, contas = obter_contas_e_empresas_f360(jwt_token)
-    
-    endpoints = [
-        "/ParcelaPublicAPI/ObterParcelas",
-        "/ParcelaPublicAPI/ListarParcelas",
-        "/TitulosPublicAPI/ObterTitulos",
-        "/PublicRelatorioAPI/GerarRelatorio"
-    ]
-    
-    dt_i = data_ini.strftime("%Y-%m-%d")
-    dt_f = data_fim.strftime("%Y-%m-%d")
-    
-    # Estruturas de teste
-    payloads = [
-        {"DataInicio": dt_i, "DataFim": dt_f},
-        {"DataInicio": dt_i, "DataFim": dt_f, "CNPJEmpresas": LOJAS_CNPJ},
-        {"Data": dt_i, "Fim": dt_f, "ModeloContabil": "provisao", "ModeloRelatorio": "gerencial", "ExtensaoDeArquivo": "json", "CNPJEmpresas": LOJAS_CNPJ}
-    ]
-    
-    for ep in endpoints:
-        url = f"https://financas.f360.com.br{ep}"
-        for p in payloads:
-            try:
-                r = requests.post(url, json=p, headers=headers, timeout=6)
-                if r.status_code == 200:
-                    res = r.json()
-                    dados = res.get("Result") if isinstance(res, dict) and "Result" in res else res
-                    if isinstance(dados, list) and len(dados) > 0:
-                        return True, f"🟢 {len(dados)} registros retornados ({ep})", dados
-                    elif isinstance(dados, str) and len(dados) > 10:
-                        return True, f"🟢 Relatório Agendado (ID: {dados})", []
-            except:
-                continue
-                
-    return False, f"🔴 Aguardando sincronização de parcelas ({len(contas)} contas ativas)", []
-
-# ---------------------------------------------------------
-# FUNÇÕES DE PROCESSAMENTO DE PLANILHAS
-# ---------------------------------------------------------
 def categorizar_plano_contas(plano):
     if pd.isna(plano):
         return "5. DESPESAS OPERACIONAIS & VENDAS"
@@ -152,6 +90,29 @@ def categorizar_plano_contas(plano):
         return "6. AMORTIZAÇÃO DE DÍVIDAS & CAPITAL"
     else:
         return "5. DESPESAS OPERACIONAIS & VENDAS"
+
+# ---------------------------------------------------------
+# PROCESSADOR DO JSON GERENCIAL DO F360
+# ---------------------------------------------------------
+def processar_json_f360(data_json):
+    df = pd.DataFrame(data_json)
+    
+    # Mapeamento de colunas F360 JSON -> Standard Dashboard
+    df['Valor'] = pd.to_numeric(df['ValorLcto'], errors='coerce').fillna(0)
+    df['Plano de Contas'] = df['NomePlanoDeContas'].fillna('Outros')
+    df['Status_Clean'] = df['StatusTitulo'].astype(str).apply(
+        lambda x: "REALIZADO" if any(s in str(x).lower() for s in ['liquidado', 'conciliado']) else "PENDENTE"
+    )
+    df['Vencimento_dt'] = pd.to_datetime(df['DataDoLcto'], format='%d/%m/%Y', errors='coerce')
+    df['Empresa'] = df['CNPJEmpresa'].map(MAPA_CNPJ_LOJA).fillna(df['CNPJEmpresa'])
+    df['Categoria_CFO'] = df['Plano de Contas'].apply(categorizar_plano_contas)
+    df['Cliente / Fornecedor'] = df['ComplemHistorico'].astype(str).apply(lambda x: x.split('-')[0].strip() if '-' in x else x[:30])
+    df['Número'] = df['NumeroTitulo'].fillna('')
+    
+    # Filtrar cancelados e baixados
+    df = df[~df['StatusTitulo'].astype(str).str.lower().str.contains('cancelado|baixado', na=False)].copy()
+    
+    return df
 
 @st.cache_data(ttl=3600)
 def processar_fluxo_caixa_loja(file, nome_loja):
@@ -226,27 +187,20 @@ st.markdown("<div class='main-title'>🍦 Gelateria Borelli - Gestão de Fluxo d
 st.markdown("<div class='main-subtitle'>Acompanhamento de liquidez, governança e extrato acumulado diário</div>", unsafe_allow_html=True)
 
 with st.sidebar:
-    st.header("⚡ Integração F360 API")
+    st.header("⚡ Integração F360 API / JSON")
     usar_api = st.toggle("Usar API F360 (Tempo Real)", value=False)
     
     if usar_api:
         jwt_token = autenticar_f360(F360_TOKEN)
         if jwt_token:
             st.success("🟢 Sessão JWT Válida!")
-            d_ini = date.today() - timedelta(days=30)
-            d_fim = date.today() + timedelta(days=30)
-            
-            ok_p, msg_p, _ = buscar_parcelas_f360_auto(jwt_token, d_ini, d_fim)
-            ok_cb, contas = obter_contas_e_empresas_f360(jwt_token)
-            
-            st.write(f"• **Parcelas/Títulos:** {msg_p}")
-            st.write(f"• **Contas Bancárias:** 🟢 {len(contas)} contas vinculadas")
         else:
-            st.error("🔴 Falha ao autenticar token no DoLogin F360")
+            st.error("🔴 Falha na autenticação JWT F360")
             
     st.divider()
-    st.header("📥 Relatório ERP (Despesas)")
-    uploaded_file = st.file_uploader("Anexe o Rateio de Títulos (.xlsx)", type=["xlsx", "xls"])
+    st.header("📥 Relatório ERP (Despesas / JSON F360)")
+    json_f360_file = st.file_uploader("Anexe o Ficheiro JSON F360 (.json)", type=["json"])
+    uploaded_file = st.file_uploader("OU Anexe o Rateio em Excel (.xlsx)", type=["xlsx", "xls"])
     
     st.divider()
     st.header("🍦 Fluxo de Caixa Por Loja")
@@ -257,10 +211,24 @@ with st.sidebar:
 if 'filtro_kpi' not in st.session_state:
     st.session_state.filtro_kpi = "PENDENTE"
 
-if uploaded_file is not None:
+# RENDERIZAÇÃO
+df_desp = None
+
+if json_f360_file is not None:
+    try:
+        data_j = json.load(json_f360_file)
+        df_desp = processar_json_f360(data_j)
+        st.sidebar.success(f"🟢 JSON F360 Carregado com {len(df_desp)} títulos!")
+    except Exception as e:
+        st.sidebar.error(f"Erro ao ler JSON F360: {e}")
+elif uploaded_file is not None:
     try:
         df_desp = processar_arquivo_despesas(uploaded_file)
-        
+    except Exception as e:
+        st.sidebar.error(f"Erro ao ler Excel: {e}")
+
+if df_desp is not None:
+    try:
         dfs_lojas = []
         if file_pantanal is not None:
             dfs_lojas.append(processar_fluxo_caixa_loja(file_pantanal, "4- PANTANAL"))
@@ -497,7 +465,7 @@ else:
         <h3>🍦 Painel de Fluxo de Caixa Executivo - Gelateria Borelli</h3>
         <p>Aguardando carga dos relatórios no menu lateral para inicializar o processamento.</p>
         <ol>
-            <li>Anexe o arquivo de despesas no menu lateral <b>(📥 Relatório ERP)</b>.</li>
+            <li>Anexe o ficheiro <b>JSON gerado no F360 (.json)</b> OU o Excel de rateio <b>(📥 Relatório ERP)</b>.</li>
             <li>Anexe o arquivo <b>Fluxo de Caixa Pantanal / Lojas</b>.</li>
         </ol>
     </div>
