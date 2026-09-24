@@ -50,9 +50,8 @@ def categorizar_plano_contas(plano):
     
     p = str(plano).upper().strip()
     
-    # Exclusão explícita de Mútuo / Intercompany
-    if any(k in p for k in ['MÚTUO', 'MUTUO', 'TRANSFERÊNCIA', 'TRANSFERENCIA']):
-        return "7. MÚTUO / TRANSFERÊNCIA INTERCOMPANY (EXCLUÍDO)"
+    if any(k in p for k in ['MÚTUO', 'MUTUO', 'TRANSFERÊNCIA', 'TRANSFERENCIA', 'MUMTUO']):
+        return "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"
     elif any(k in p for k in ['CMV', 'DESCARTÁVEIS', 'DESCARTAVEIS', 'PRODUTO PARA REVENDA', 'LEITE', 'INSUMOS', 'MEC3', 'BOBINAS', 'FRUTAS', 'RIBERFOODS']):
         return "1. FORNECEDORES / MERCADORIAS (CMV)"
     elif any(k in p for k in ['ICMS', 'IMPOSTO', 'FISCAL', 'DAS', 'TAXAS MUNICIPAIS', 'PIS', 'COFINS']):
@@ -125,7 +124,7 @@ def processar_arquivo_despesas(file):
         
     df = df[df['Tipo'].astype(str).str.contains('A Pagar|Pagar', case=False, na=False)].copy()
     
-    # REGRA DE GOVERNAÇA: Desconsiderar títulos Cancelados ou Baixados
+    # Desconsiderar títulos cancelados ou baixados
     status_invalidos = ['cancelado', 'baixado']
     df = df[~df['Status'].astype(str).str.lower().apply(lambda x: any(s in x for s in status_invalidos))].copy()
     
@@ -133,9 +132,6 @@ def processar_arquivo_despesas(file):
     df['Vencimento_dt'] = pd.to_datetime(df['Vencimento'], errors='coerce')
     df['Dia'] = df['Vencimento_dt'].dt.day
     df['Categoria_CFO'] = df['Plano de Contas'].apply(categorizar_plano_contas)
-    
-    # Excluir lançamentos de Mútuo / Intercompany
-    df = df[df['Categoria_CFO'] != "7. MÚTUO / TRANSFERÊNCIA INTERCOMPANY (EXCLUÍDO)"].copy()
     
     df['Status_Clean'] = df['Status'].astype(str).apply(
         lambda x: "REALIZADO" if any(s in str(x) for s in ['Liquidado', 'Conciliado']) else "PENDENTE"
@@ -225,11 +221,16 @@ if uploaded_file is not None:
 
         st.divider()
 
+        # Separar Despesas Operacionais dos Mútuos
+        df_desp_operacional = df_desp_filtered[df_desp_filtered['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"].copy()
+        df_desp_mutuo = df_desp_filtered[df_desp_filtered['Categoria_CFO'] == "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"].copy()
+
         # CÁLCULO DOS KPIS DE EXTRATO BANCO
         tot_entradas_loja = df_lojas_filtered['Entradas'].sum() if not df_lojas_filtered.empty else 0.0
-        tot_previsto = df_desp_filtered['Valor'].sum()
-        tot_realizado = df_desp_filtered[df_desp_filtered['Status_Clean'] == 'REALIZADO']['Valor'].sum()
-        tot_pendente = df_desp_filtered[df_desp_filtered['Status_Clean'] == 'PENDENTE']['Valor'].sum()
+        tot_previsto = df_desp_operacional['Valor'].sum()
+        tot_realizado = df_desp_operacional[df_desp_operacional['Status_Clean'] == 'REALIZADO']['Valor'].sum()
+        tot_pendente = df_desp_operacional[df_desp_operacional['Status_Clean'] == 'PENDENTE']['Valor'].sum()
+        tot_mutuo_realizado = df_desp_mutuo[df_desp_mutuo['Status_Clean'] == 'REALIZADO']['Valor'].sum()
         
         if not df_lojas_filtered.empty:
             saldo_atual_banco = df_lojas_filtered.sort_values('Vencimento_dt')['Saldo_Banco'].iloc[-1]
@@ -254,7 +255,7 @@ if uploaded_file is not None:
                 st.session_state.filtro_kpi = "PENDENTE"
 
         with k4:
-            delta_label = f"Entradas no Período: R$ {tot_entradas_loja:,.2f}" if tot_entradas_loja > 0 else None
+            delta_label = f"Entradas: R$ {tot_entradas_loja:,.2f}" if tot_entradas_loja > 0 else None
             st.metric("Saldo Real em Conta Bancária", f"R$ {saldo_atual_banco:,.2f}", delta=delta_label)
 
         st.markdown("<br>", unsafe_allow_html=True)
@@ -285,8 +286,8 @@ if uploaded_file is not None:
             ]
             
             for c in cats:
-                p = df_desp_filtered[df_desp_filtered['Categoria_CFO'] == c]['Valor'].sum()
-                r = df_desp_filtered[(df_desp_filtered['Categoria_CFO'] == c) & (df_desp_filtered['Status_Clean'] == 'REALIZADO')]['Valor'].sum()
+                p = df_desp_operacional[df_desp_operacional['Categoria_CFO'] == c]['Valor'].sum()
+                r = df_desp_operacional[(df_desp_operacional['Categoria_CFO'] == c) & (df_desp_operacional['Status_Clean'] == 'REALIZADO')]['Valor'].sum()
                 v = r - p
                 pct = (p / tot_entradas_loja * 100) if tot_entradas_loja > 0 else ((p / tot_previsto * 100) if tot_previsto > 0 else 0)
                 dre_list.append({
@@ -297,14 +298,37 @@ if uploaded_file is not None:
                     "% do Total": f"{pct:.1f}%"
                 })
                 
-            res_prev = tot_entradas_loja - tot_previsto
-            res_real = tot_entradas_loja - tot_realizado
+            res_operacional_prev = tot_entradas_loja - tot_previsto
+            res_operacional_real = tot_entradas_loja - tot_realizado
+            
             dre_list.append({
-                "Categoria CFO": "(=) RESULTADO LÍQUIDO OPERACIONAL",
-                "Previsto (R$)": f"R$ {res_prev:,.2f}",
-                "Realizado (R$)": f"R$ {res_real:,.2f}",
-                "Variação (R$)": f"R$ {res_real - res_prev:,.2f}",
-                "% do Total": f"{(res_real / tot_entradas_loja * 100) if tot_entradas_loja > 0 else 0:.1f}%"
+                "Categoria CFO": "(=) RESULTADO LÍQUIDO OPERACIONAL (EBITDA DA LOJA)",
+                "Previsto (R$)": f"R$ {res_operacional_prev:,.2f}",
+                "Realizado (R$)": f"R$ {res_operacional_real:,.2f}",
+                "Variação (R$)": f"R$ {res_operacional_real - res_operacional_prev:,.2f}",
+                "% do Total": f"{(res_operacional_real / tot_entradas_loja * 100) if tot_entradas_loja > 0 else 0:.1f}%"
+            })
+            
+            # Linha Mútuo Intercompany
+            p_mutuo = df_desp_mutuo['Valor'].sum()
+            r_mutuo = tot_mutuo_realizado
+            dre_list.append({
+                "Categoria CFO": "   (-) 7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO ENTRE LOJAS",
+                "Previsto (R$)": f"R$ {p_mutuo:,.2f}",
+                "Realizado (R$)": f"R$ {r_mutuo:,.2f}",
+                "Variação (R$)": f"R$ {r_mutuo - p_mutuo:,.2f}",
+                "% do Total": f"{(p_mutuo / tot_entradas_loja * 100) if tot_entradas_loja > 0 else 0:.1f}%"
+            })
+            
+            # Geração Final
+            res_final_prev = res_operacional_prev - p_mutuo
+            res_final_real = res_operacional_real - r_mutuo
+            dre_list.append({
+                "Categoria CFO": "(=) GERAÇÃO LÍQUIDA FINAL DE CAIXA DA CONTA",
+                "Previsto (R$)": f"R$ {res_final_prev:,.2f}",
+                "Realizado (R$)": f"R$ {res_final_real:,.2f}",
+                "Variação (R$)": f"R$ {res_final_real - res_final_prev:,.2f}",
+                "% do Total": f"{(res_final_real / tot_entradas_loja * 100) if tot_entradas_loja > 0 else 0:.1f}%"
             })
             
             st.dataframe(pd.DataFrame(dre_list), use_container_width=True, hide_index=True)
