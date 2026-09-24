@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 import requests
 import json
-import re
 from datetime import datetime, date, timedelta
 
 # ---------------------------------------------------------
@@ -53,10 +52,8 @@ MAPA_CNPJ_LOJA = {
     "36.240.923/0003-20": "8 - GOIABEIRAS"
 }
 
-LOJAS_CNPJ_LISTA = list(MAPA_CNPJ_LOJA.keys())
-
 # ---------------------------------------------------------
-# AUTENTICAÇÃO E RELATÓRIO F360
+# AUTENTICAÇÃO E BUSCA DIRETA DE VENCIMENTOS F360
 # ---------------------------------------------------------
 def autenticar_f360(token_api):
     url = "https://financas.f360.com.br/PublicLoginAPI/DoLogin"
@@ -72,33 +69,6 @@ def autenticar_f360(token_api):
         return None
     except:
         return None
-
-def solicitar_relatorio_f360(jwt_token, d_inicio, d_fim):
-    url = "https://financas.f360.com.br/PublicRelatorioAPI/GerarRelatorio"
-    headers = {
-        "Authorization": f"Bearer {jwt_token}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "Data": d_inicio.strftime("%Y-%m-%d"),
-        "Fim": d_fim.strftime("%Y-%m-%d"),
-        "ModeloContabil": "provisao",
-        "ModeloRelatorio": "gerencial",
-        "ExtensaoDeArquivo": "json",
-        "EnviarNotificacaoPorWebhook": False,
-        "URLNotificaticao": "",
-        "Contas": "",
-        "CNPJEmpresas": LOJAS_CNPJ_LISTA
-    }
-    try:
-        r = requests.post(url, json=payload, headers=headers, timeout=10)
-        if r.status_code == 200:
-            res = r.json()
-            rel_id = res.get("Result", "Solicitado") if isinstance(res, dict) else "Solicitado"
-            return True, f"🟢 Relatório F360 solicitado com sucesso! (ID: {rel_id})"
-        return False, f"HTTP {r.status_code}: {r.text[:100]}"
-    except Exception as e:
-        return False, f"Erro na requisição: {str(e)}"
 
 def categorizar_plano_contas(plano):
     if pd.isna(plano):
@@ -122,49 +92,38 @@ def categorizar_plano_contas(plano):
         return "5. DESPESAS OPERACIONAIS & VENDAS"
 
 # ---------------------------------------------------------
-# PROCESSADOR DO JSON GERENCIAL F360 (VENCIMENTO PRECISO)
+# LEITURA DE EXCEL (RATEIO DE TÍTULOS COM VENCIMENTO REAL)
 # ---------------------------------------------------------
-def processar_json_f360(data_json):
-    df = pd.DataFrame(data_json)
-    
-    df['Valor'] = pd.to_numeric(df['ValorLcto'], errors='coerce').fillna(0)
-    df['Plano de Contas'] = df['NomePlanoDeContas'].fillna('Outros')
-    
-    df['Status_Clean'] = df['StatusTitulo'].astype(str).apply(
-        lambda x: "REALIZADO" if any(s in str(x).lower() for s in ['liquidado', 'conciliado']) else "PENDENTE"
-    )
-    
-    # EXTRAÇÃO INTELIGENTE DA DATA DE VENCIMENTO REAL
-    def extrair_vencimento_real(row):
-        # 1. Se estiver Liquidado/Pago e tiver data de liquidação, considera ela
-        if row['Status_Clean'] == 'REALIZADO' and pd.notna(row.get('Liquidacao')):
-            dt_liq = pd.to_datetime(row['Liquidacao'], errors='coerce')
-            if pd.notna(dt_liq):
-                return dt_liq.tz_localize(None) if dt_liq.tz is not None else dt_liq
-
-        # 2. Utiliza DataDoLcto (Data real de agendamento/vencimento no F360)
-        dt_lcto = pd.to_datetime(row.get('DataDoLcto'), format='%d/%m/%Y', errors='coerce')
-        if pd.notna(dt_lcto):
-            return dt_lcto
+@st.cache_data(ttl=3600)
+def processar_arquivo_despesas(file):
+    df_raw = pd.read_excel(file)
+    header_idx = None
+    for idx, row in df_raw.iterrows():
+        row_str = " ".join(row.dropna().astype(str))
+        if "Tipo" in row_str and "Vencimento" in row_str and "Valor Bruto" in row_str:
+            header_idx = idx
+            break
             
-        # 3. Fallback para DataCompetencia
-        dt_comp = pd.to_datetime(row.get('DataCompetencia'), format='%d/%m/%Y', errors='coerce')
-        return dt_comp
-
-    df['Vencimento_dt'] = df.apply(extrair_vencimento_real, axis=1)
-    df = df.dropna(subset=['Vencimento_dt']).copy()
+    if header_idx is not None:
+        df = df_raw.iloc[header_idx + 1:].copy()
+        df.columns = df_raw.iloc[header_idx].values
+    else:
+        df = df_raw.copy()
+        
+    df = df[df['Tipo'].astype(str).str.contains('A Pagar|Pagar', case=False, na=False)].copy()
+    status_invalidos = ['cancelado', 'baixado']
+    df = df[~df['Status'].astype(str).str.lower().apply(lambda x: any(s in x for s in status_invalidos))].copy()
     
+    df['Valor'] = pd.to_numeric(df['Valor Bruto'], errors='coerce').fillna(0)
+    df['Vencimento_dt'] = pd.to_datetime(df['Vencimento'], errors='coerce')
+    df = df.dropna(subset=['Vencimento_dt']).copy()
     df['Vencimento_dt'] = pd.to_datetime(df['Vencimento_dt'])
     df['Dia'] = df['Vencimento_dt'].dt.day
-    
-    df['Empresa'] = df['CNPJEmpresa'].map(MAPA_CNPJ_LOJA).fillna(df['CNPJEmpresa'])
     df['Categoria_CFO'] = df['Plano de Contas'].apply(categorizar_plano_contas)
-    df['Cliente / Fornecedor'] = df['ComplemHistorico'].astype(str).apply(lambda x: x.split('-')[0].strip() if '-' in x else x[:30])
-    df['Número'] = df['NumeroTitulo'].fillna('')
     
-    # Filtrar cancelados e baixados
-    df = df[~df['StatusTitulo'].astype(str).str.lower().str.contains('cancelado|baixado', na=False)].copy()
-    
+    df['Status_Clean'] = df['Status'].astype(str).apply(
+        lambda x: "REALIZADO" if any(s in str(x) for s in ['Liquidado', 'Conciliado']) else "PENDENTE"
+    )
     return df
 
 @st.cache_data(ttl=3600)
@@ -204,38 +163,6 @@ def processar_fluxo_caixa_loja(file, nome_loja):
     df['Empresa'] = nome_loja
     return df
 
-@st.cache_data(ttl=3600)
-def processar_arquivo_despesas(file):
-    df_raw = pd.read_excel(file)
-    header_idx = None
-    for idx, row in df_raw.iterrows():
-        row_str = " ".join(row.dropna().astype(str))
-        if "Tipo" in row_str and "Vencimento" in row_str and "Valor Bruto" in row_str:
-            header_idx = idx
-            break
-            
-    if header_idx is not None:
-        df = df_raw.iloc[header_idx + 1:].copy()
-        df.columns = df_raw.iloc[header_idx].values
-    else:
-        df = df_raw.copy()
-        
-    df = df[df['Tipo'].astype(str).str.contains('A Pagar|Pagar', case=False, na=False)].copy()
-    status_invalidos = ['cancelado', 'baixado']
-    df = df[~df['Status'].astype(str).str.lower().apply(lambda x: any(s in x for s in status_invalidos))].copy()
-    
-    df['Valor'] = pd.to_numeric(df['Valor Bruto'], errors='coerce').fillna(0)
-    df['Vencimento_dt'] = pd.to_datetime(df['Vencimento'], errors='coerce')
-    df = df.dropna(subset=['Vencimento_dt']).copy()
-    df['Vencimento_dt'] = pd.to_datetime(df['Vencimento_dt'])
-    df['Dia'] = df['Vencimento_dt'].dt.day
-    df['Categoria_CFO'] = df['Plano de Contas'].apply(categorizar_plano_contas)
-    
-    df['Status_Clean'] = df['Status'].astype(str).apply(
-        lambda x: "REALIZADO" if any(s in str(x) for s in ['Liquidado', 'Conciliado']) else "PENDENTE"
-    )
-    return df
-
 # ---------------------------------------------------------
 # INTERFACE DO USUÁRIO
 # ---------------------------------------------------------
@@ -243,29 +170,19 @@ st.markdown("<div class='main-title'>🍦 Gelateria Borelli - Gestão de Fluxo d
 st.markdown("<div class='main-subtitle'>Acompanhamento de liquidez, governança e extrato acumulado diário</div>", unsafe_allow_html=True)
 
 with st.sidebar:
-    st.header("⚡ Integração F360 API / JSON")
+    st.header("⚡ Integração F360 API")
     usar_api = st.toggle("Usar API F360 (Tempo Real)", value=False)
     
     if usar_api:
         jwt_token = autenticar_f360(F360_TOKEN)
         if jwt_token:
             st.success("🟢 Sessão JWT Válida!")
-            
-            if st.button("🚀 Solicitar Relatório F360"):
-                d_ini = date(2026, 9, 1)
-                d_fim = date(2026, 9, 30)
-                ok_sol, msg_sol = solicitar_relatorio_f360(jwt_token, d_ini, d_fim)
-                if ok_sol:
-                    st.info(msg_sol)
-                else:
-                    st.error(msg_sol)
         else:
             st.error("🔴 Falha na autenticação JWT F360")
             
     st.divider()
-    st.header("📥 Relatório ERP (Despesas / JSON F360)")
-    json_f360_file = st.file_uploader("Anexe o Ficheiro JSON F360 (.json)", type=["json"])
-    uploaded_file = st.file_uploader("OU Anexe o Rateio em Excel (.xlsx)", type=["xlsx", "xls"])
+    st.header("📥 Relatório ERP (Despesas / Rateio)")
+    uploaded_file = st.file_uploader("Anexe o Rateio de Títulos em Excel (.xlsx)", type=["xlsx", "xls"])
     
     st.divider()
     st.header("🍦 Fluxo de Caixa Por Loja")
@@ -279,16 +196,10 @@ if 'filtro_kpi' not in st.session_state:
 # RENDERIZAÇÃO
 df_desp = None
 
-if json_f360_file is not None:
-    try:
-        data_j = json.load(json_f360_file)
-        df_desp = processar_json_f360(data_j)
-        st.sidebar.success(f"🟢 JSON F360 Carregado com {len(df_desp)} títulos!")
-    except Exception as e:
-        st.sidebar.error(f"Erro ao ler JSON F360: {e}")
-elif uploaded_file is not None:
+if uploaded_file is not None:
     try:
         df_desp = processar_arquivo_despesas(uploaded_file)
+        st.sidebar.success(f"🟢 Rateio de Títulos Carregado com {len(df_desp)} lançamentos!")
     except Exception as e:
         st.sidebar.error(f"Erro ao ler Excel: {e}")
 
@@ -316,7 +227,7 @@ if df_desp is not None and not df_desp.empty:
             loja_selecionada = st.radio("", lojas_opcoes, horizontal=True)
 
         with col_filtro2:
-            st.caption("📅 **Período de Vencimento:**")
+            st.caption("📅 **Período de Vencimento Real:**")
             date_range = st.date_input(
                 "",
                 value=(min_date, max_date),
@@ -533,7 +444,7 @@ else:
         <h3>🍦 Painel de Fluxo de Caixa Executivo - Gelateria Borelli</h3>
         <p>Aguardando carga dos relatórios no menu lateral para inicializar o processamento.</p>
         <ol>
-            <li>Anexe o ficheiro <b>JSON gerado no F360 (.json)</b> OU o Excel de rateio <b>(📥 Relatório ERP)</b>.</li>
+            <li>Anexe o arquivo de despesas no menu lateral <b>(📥 Relatório ERP - Rateio de Títulos em Excel)</b>.</li>
             <li>Anexe o arquivo <b>Fluxo de Caixa Pantanal / Lojas</b>.</li>
         </ol>
     </div>
