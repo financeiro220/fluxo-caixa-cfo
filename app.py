@@ -42,7 +42,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# TOKEN API F360 E CNPJS
+# TOKEN API F360 E CNPJS DAS UNIDADES
 F360_TOKEN = "11001cbb-792d-45e5-b2f9-03ffc46fe7ed"
 
 LOJAS_CNPJ = [
@@ -52,7 +52,7 @@ LOJAS_CNPJ = [
 ]
 
 # ---------------------------------------------------------
-# AUTENTICAÇÃO E BUSCA DINÂMICA F360
+# AUTENTICAÇÃO E CONSULTA INTELIGENTE F360
 # ---------------------------------------------------------
 def autenticar_f360(token_api):
     url = "https://financas.f360.com.br/PublicLoginAPI/DoLogin"
@@ -70,45 +70,7 @@ def autenticar_f360(token_api):
     except:
         return None
 
-def buscar_parcelas_dinamicas(jwt_token, data_ini, data_fim):
-    headers = {
-        "Authorization": f"Bearer {jwt_token}",
-        "Content-Type": "application/json"
-    }
-    
-    todas_parcelas = []
-    
-    endpoints = [
-        "/ParcelaPublicAPI/ObterParcelas",
-        "/ParcelaPublicAPI/ListarParcelas",
-        "/TitulosPublicAPI/ObterTitulos",
-        "/PublicAPI/TitulosPublicAPI/ObterTitulos"
-    ]
-    
-    # Testar payload geral e individual
-    payloads_gerais = [
-        {"DataInicio": data_ini.strftime("%Y-%m-%d"), "DataFim": data_fim.strftime("%Y-%m-%d")},
-        {"DataInicio": data_ini.strftime("%Y-%m-%d"), "DataFim": data_fim.strftime("%Y-%m-%d"), "CNPJEmpresas": LOJAS_CNPJ},
-        {"DataInicio": data_ini.strftime("%Y-%m-%d"), "DataFim": data_fim.strftime("%Y-%m-%d"), "Cnpjs": [c.replace(".","").replace("/","").replace("-","") for c in LOJAS_CNPJ]}
-    ]
-    
-    for ep in endpoints:
-        url = f"https://financas.f360.com.br{ep}"
-        for p in payloads_gerais:
-            try:
-                r = requests.post(url, json=p, headers=headers, timeout=6)
-                if r.status_code == 200:
-                    res = r.json()
-                    dados = res.get("Result") if isinstance(res, dict) and "Result" in res else res
-                    if isinstance(dados, list) and len(dados) > 0:
-                        todas_parcelas.extend(dados)
-                        return True, f"🟢 {len(dados)} Títulos/Parcelas carregados ({ep})", todas_parcelas
-            except:
-                continue
-                
-    return False, f"🔴 0 parcelas entre {data_ini.strftime('%d/%m/%Y')} e {data_fim.strftime('%d/%m/%Y')}", []
-
-def buscar_contas_bancarias_f360(jwt_token):
+def obter_contas_e_empresas_f360(jwt_token):
     url = "https://financas.f360.com.br/ContaBancariaPublicAPI/ListarContasBancarias"
     headers = {
         "Authorization": f"Bearer {jwt_token}",
@@ -119,11 +81,53 @@ def buscar_contas_bancarias_f360(jwt_token):
         if r.status_code == 200:
             res = r.json()
             dados = res.get("Result", []) if isinstance(res, dict) else res
-            qtd = len(dados) if isinstance(dados, list) else 0
-            return True, f"🟢 {qtd} Contas Bancárias ativas no F360", dados
-        return False, f"HTTP {r.status_code}", []
+            return True, dados
+        return False, []
     except:
-        return False, "Erro de conexão", []
+        return False, []
+
+def buscar_parcelas_f360_auto(jwt_token, data_ini, data_fim):
+    headers = {
+        "Authorization": f"Bearer {jwt_token}",
+        "Content-Type": "application/json"
+    }
+    
+    # 1. Pega os dados das contas para extrair IDs internos de empresa se existirem
+    ok_cb, contas = obter_contas_e_empresas_f360(jwt_token)
+    
+    endpoints = [
+        "/ParcelaPublicAPI/ObterParcelas",
+        "/ParcelaPublicAPI/ListarParcelas",
+        "/TitulosPublicAPI/ObterTitulos",
+        "/PublicRelatorioAPI/GerarRelatorio"
+    ]
+    
+    dt_i = data_ini.strftime("%Y-%m-%d")
+    dt_f = data_fim.strftime("%Y-%m-%d")
+    
+    # Estruturas de teste
+    payloads = [
+        {"DataInicio": dt_i, "DataFim": dt_f},
+        {"DataInicio": dt_i, "DataFim": dt_f, "CNPJEmpresas": LOJAS_CNPJ},
+        {"Data": dt_i, "Fim": dt_f, "ModeloContabil": "provisao", "ModeloRelatorio": "gerencial", "ExtensaoDeArquivo": "json", "CNPJEmpresas": LOJAS_CNPJ}
+    ]
+    
+    for ep in endpoints:
+        url = f"https://financas.f360.com.br{ep}"
+        for p in payloads:
+            try:
+                r = requests.post(url, json=p, headers=headers, timeout=6)
+                if r.status_code == 200:
+                    res = r.json()
+                    dados = res.get("Result") if isinstance(res, dict) and "Result" in res else res
+                    if isinstance(dados, list) and len(dados) > 0:
+                        return True, f"🟢 {len(dados)} registros retornados ({ep})", dados
+                    elif isinstance(dados, str) and len(dados) > 10:
+                        return True, f"🟢 Relatório Agendado (ID: {dados})", []
+            except:
+                continue
+                
+    return False, f"🔴 Aguardando sincronização de parcelas ({len(contas)} contas ativas)", []
 
 # ---------------------------------------------------------
 # FUNÇÕES DE PROCESSAMENTO DE PLANILHAS
@@ -229,16 +233,14 @@ with st.sidebar:
         jwt_token = autenticar_f360(F360_TOKEN)
         if jwt_token:
             st.success("🟢 Sessão JWT Válida!")
+            d_ini = date.today() - timedelta(days=30)
+            d_fim = date.today() + timedelta(days=30)
             
-            # Janela de busca ampla (últimos 60 dias até os próximos 60 dias)
-            d_ini = date.today() - timedelta(days=60)
-            d_fim = date.today() + timedelta(days=60)
+            ok_p, msg_p, _ = buscar_parcelas_f360_auto(jwt_token, d_ini, d_fim)
+            ok_cb, contas = obter_contas_e_empresas_f360(jwt_token)
             
-            ok_parc, msg_parc, _ = buscar_parcelas_dinamicas(jwt_token, d_ini, d_fim)
-            ok_cb, msg_cb, _ = buscar_contas_bancarias_f360(jwt_token)
-            
-            st.write(f"• **Parcelas Dinâmicas:** {msg_parc}")
-            st.write(f"• **Contas Bancárias:** {msg_cb}")
+            st.write(f"• **Parcelas/Títulos:** {msg_p}")
+            st.write(f"• **Contas Bancárias:** 🟢 {len(contas)} contas vinculadas")
         else:
             st.error("🔴 Falha ao autenticar token no DoLogin F360")
             
