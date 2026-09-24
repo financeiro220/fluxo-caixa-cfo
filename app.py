@@ -52,8 +52,10 @@ MAPA_CNPJ_LOJA = {
     "36.240.923/0003-20": "8 - GOIABEIRAS"
 }
 
+LOJAS_CNPJ_LISTA = list(MAPA_CNPJ_LOJA.keys())
+
 # ---------------------------------------------------------
-# AUTENTICAÇÃO F360
+# AUTENTICAÇÃO E RELATÓRIO F360
 # ---------------------------------------------------------
 def autenticar_f360(token_api):
     url = "https://financas.f360.com.br/PublicLoginAPI/DoLogin"
@@ -69,6 +71,33 @@ def autenticar_f360(token_api):
         return None
     except:
         return None
+
+def solicitar_relatorio_f360(jwt_token, d_inicio, d_fim):
+    url = "https://financas.f360.com.br/PublicRelatorioAPI/GerarRelatorio"
+    headers = {
+        "Authorization": f"Bearer {jwt_token}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "Data": d_inicio.strftime("%Y-%m-%d"),
+        "Fim": d_fim.strftime("%Y-%m-%d"),
+        "ModeloContabil": "provisao",
+        "ModeloRelatorio": "gerencial",
+        "ExtensaoDeArquivo": "json",
+        "EnviarNotificacaoPorWebhook": False,
+        "URLNotificaticao": "",
+        "Contas": "",
+        "CNPJEmpresas": LOJAS_CNPJ_LISTA
+    }
+    try:
+        r = requests.post(url, json=payload, headers=headers, timeout=10)
+        if r.status_code == 200:
+            res = r.json()
+            rel_id = res.get("Result", "Solicitado") if isinstance(res, dict) else "Solicitado"
+            return True, f"🟢 Relatório F360 solicitado com sucesso! (ID: {rel_id})"
+        return False, f"HTTP {r.status_code}: {r.text[:100]}"
+    except Exception as e:
+        return False, f"Erro na requisição: {str(e)}"
 
 def categorizar_plano_contas(plano):
     if pd.isna(plano):
@@ -92,7 +121,7 @@ def categorizar_plano_contas(plano):
         return "5. DESPESAS OPERACIONAIS & VENDAS"
 
 # ---------------------------------------------------------
-# PROCESSADOR DO JSON GERENCIAL DO F360
+# PROCESSADOR ROBUSTO DO JSON GERENCIAL DO F360
 # ---------------------------------------------------------
 def processar_json_f360(data_json):
     df = pd.DataFrame(data_json)
@@ -103,19 +132,16 @@ def processar_json_f360(data_json):
         lambda x: "REALIZADO" if any(s in str(x).lower() for s in ['liquidado', 'conciliado']) else "PENDENTE"
     )
     
-    # TRATAMENTO CORRETO DAS DATAS DE VENCIMENTO / LIQUIDAÇÃO
-    def definir_data_vencimento(row):
-        # Se for realizado/liquidado e tiver data de liquidação, usa ela
-        if row['Status_Clean'] == 'REALIZADO' and pd.notna(row.get('Liquidacao')):
-            return pd.to_datetime(row['Liquidacao'], errors='coerce')
-        # Senão usa DataCompetencia
-        if pd.notna(row.get('DataCompetencia')):
-            return pd.to_datetime(row['DataCompetencia'], format='%d/%m/%Y', errors='coerce')
-        # Fallback para DataDoLcto
-        return pd.to_datetime(row.get('DataDoLcto'), format='%d/%m/%Y', errors='coerce')
-
-    df['Vencimento_dt'] = df.apply(definir_data_vencimento, axis=1)
+    # TRATAMENTO SEGURO DE DATAS
+    df['Vencimento_dt'] = pd.to_datetime(df['DataCompetencia'], format='%d/%m/%Y', errors='coerce')
+    df_fallback = pd.to_datetime(df['DataDoLcto'], format='%d/%m/%Y', errors='coerce')
+    df['Vencimento_dt'] = df['Vencimento_dt'].fillna(df_fallback)
+    
+    # Remove entradas sem data válida
     df = df.dropna(subset=['Vencimento_dt']).copy()
+    
+    # Garante tipo datetime antes do .dt
+    df['Vencimento_dt'] = pd.to_datetime(df['Vencimento_dt'])
     df['Dia'] = df['Vencimento_dt'].dt.day
     
     df['Empresa'] = df['CNPJEmpresa'].map(MAPA_CNPJ_LOJA).fillna(df['CNPJEmpresa'])
@@ -150,6 +176,7 @@ def processar_fluxo_caixa_loja(file, nome_loja):
     df.columns = [str(c).strip() for c in df.columns]
     df['Vencimento_dt'] = pd.to_datetime(df['Data'], errors='coerce')
     df = df.dropna(subset=['Vencimento_dt']).copy()
+    df['Vencimento_dt'] = pd.to_datetime(df['Vencimento_dt'])
     df['Dia'] = df['Vencimento_dt'].dt.day
     
     cols_total = [i for i, col in enumerate(df.columns) if col == 'Total']
@@ -186,6 +213,8 @@ def processar_arquivo_despesas(file):
     
     df['Valor'] = pd.to_numeric(df['Valor Bruto'], errors='coerce').fillna(0)
     df['Vencimento_dt'] = pd.to_datetime(df['Vencimento'], errors='coerce')
+    df = df.dropna(subset=['Vencimento_dt']).copy()
+    df['Vencimento_dt'] = pd.to_datetime(df['Vencimento_dt'])
     df['Dia'] = df['Vencimento_dt'].dt.day
     df['Categoria_CFO'] = df['Plano de Contas'].apply(categorizar_plano_contas)
     
@@ -208,6 +237,15 @@ with st.sidebar:
         jwt_token = autenticar_f360(F360_TOKEN)
         if jwt_token:
             st.success("🟢 Sessão JWT Válida!")
+            
+            if st.button("🚀 Solicitado Relatório Mês Atual"):
+                d_ini = date(2026, 9, 1)
+                d_fim = date(2026, 9, 30)
+                ok_sol, msg_sol = solicitar_relatorio_f360(jwt_token, d_ini, d_fim)
+                if ok_sol:
+                    st.info(msg_sol)
+                else:
+                    st.error(msg_sol)
         else:
             st.error("🔴 Falha na autenticação JWT F360")
             
@@ -241,7 +279,7 @@ elif uploaded_file is not None:
     except Exception as e:
         st.sidebar.error(f"Erro ao ler Excel: {e}")
 
-if df_desp is not None:
+if df_desp is not None and not df_desp.empty:
     try:
         dfs_lojas = []
         if file_pantanal is not None:
@@ -253,8 +291,8 @@ if df_desp is not None:
             
         df_lojas_concat = pd.concat(dfs_lojas, ignore_index=True) if len(dfs_lojas) > 0 else pd.DataFrame()
         
-        min_date = df_desp['Vencimento_dt'].min().date() if not df_desp['Vencimento_dt'].isnull().all() else pd.to_datetime('today').date()
-        max_date = df_desp['Vencimento_dt'].max().date() if not df_desp['Vencimento_dt'].isnull().all() else pd.to_datetime('today').date()
+        min_date = df_desp['Vencimento_dt'].min().date()
+        max_date = df_desp['Vencimento_dt'].max().date()
 
         col_filtro1, col_filtro2 = st.columns([2, 1])
         
@@ -265,7 +303,7 @@ if df_desp is not None:
             loja_selecionada = st.radio("", lojas_opcoes, horizontal=True)
 
         with col_filtro2:
-            st.caption("📅 **Período de Vencimento / Liquidação:**")
+            st.caption("📅 **Período de Vencimento:**")
             date_range = st.date_input(
                 "",
                 value=(min_date, max_date),
@@ -411,8 +449,7 @@ if df_desp is not None:
                 piv_sai = df_lojas_filtered.groupby('Dia')['Saídas'].sum()
                 piv_sal = df_lojas_filtered.groupby('Dia')['Saldo_Banco'].last()
             else:
-                # MONTA O FLUXO DIÁRIO AUTOMÁTICO A PARTIR DO JSON SE NÃO HOUVER EXCEL DE LOJA
-                df_desp_filtered['Dia'] = df_desp_filtered['Vencimento_dt'].dt.day
+                df_desp_filtered['Dia'] = pd.to_datetime(df_desp_filtered['Vencimento_dt']).dt.day
                 dias_mes = sorted([int(d) for d in df_desp_filtered['Dia'].dropna().unique() if d > 0])
                 piv_ent = pd.Series(0.0, index=dias_mes)
                 piv_sai = df_desp_filtered[df_desp_filtered['Status_Clean'] == 'REALIZADO'].groupby('Dia')['Valor'].sum()
