@@ -40,14 +40,6 @@ st.markdown("""
         padding: 25px;
         margin-top: 20px;
     }
-    .status-box {
-        background-color: #1F2937;
-        border: 1px solid #374151;
-        border-radius: 6px;
-        padding: 12px;
-        margin-bottom: 10px;
-        font-size: 13px;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -55,7 +47,7 @@ st.markdown("""
 F360_TOKEN = "11001cbb-792d-45e5-b2f9-03ffc46fe7ed"
 
 # ---------------------------------------------------------
-# CARGA E DIAGNÓSTICO DA API F360
+# AUTENTICAÇÃO E REQUISIÇÕES CONFORME MANUAL FINANÇAS F360
 # ---------------------------------------------------------
 @st.cache_data(ttl=300)
 def obter_jwt_token_f360(token):
@@ -72,57 +64,78 @@ def obter_jwt_token_f360(token):
     except:
         return None
 
-def diagnosticar_modulos_f360(jwt_token):
+def consultar_endpoint_f360(jwt_token, endpoint, payload=None):
     headers = {
         "Authorization": f"Bearer {jwt_token}",
         "Content-Type": "application/json"
     }
+    url = f"https://financas.f360.com.br{endpoint}"
     
+    try:
+        if payload:
+            r = requests.post(url, json=payload, headers=headers, timeout=12)
+        else:
+            r = requests.get(url, headers=headers, timeout=12)
+            
+        if r.status_code == 200:
+            return True, r.json()
+        else:
+            return False, f"Code {r.status_code}: {r.text[:100]}"
+    except Exception as e:
+        return False, str(e)
+
+def diagnosticar_modulos_f360(jwt_token):
     status_diag = {
-        "titulos": {"ok": False, "qtd": 0, "msg": "Não baixado"},
-        "empresas": {"ok": False, "qtd": 0, "msg": "Não baixado"},
-        "caixas": {"ok": False, "qtd": 0, "msg": "Não baixado"}
+        "titulos": {"ok": False, "msg": "Não consultado"},
+        "caixas": {"ok": False, "msg": "Não consultado"},
+        "empresas": {"ok": False, "msg": "Não consultado"}
     }
     
-    # 1. Testar Títulos
-    try:
-        url_t = "https://financas.f360.com.br/PublicAPI/TitulosPublicAPI/ObterTitulos"
-        payload_t = {"DataInicio": "2026-09-01", "DataFim": "2026-09-30"}
-        r_t = requests.post(url_t, json=payload_t, headers=headers, timeout=8)
-        if r_t.status_code == 200:
-            data = r_t.json()
-            qtd = len(data) if isinstance(data, list) else (len(data.get("Result", [])) if isinstance(data, dict) else 0)
-            status_diag["titulos"] = {"ok": True, "qtd": qtd, "msg": f"OK ({qtd} títulos carregados)"}
+    # Datas de teste (mês de setembro/2026)
+    payload_datas = {
+        "DataInicio": "2026-09-01",
+        "DataFim": "2026-09-30"
+    }
+    
+    # 1. Contas a Pagar / Títulos
+    ok_t, res_t = consultar_endpoint_f360(jwt_token, "/PublicAPI/TitulosPublicAPI/ObterTitulos", payload_datas)
+    if ok_t:
+        qtd = len(res_t) if isinstance(res_t, list) else 0
+        status_diag["titulos"] = {"ok": True, "msg": f"OK ({qtd} títulos carregados)"}
+    else:
+        # Tentativa na rota legada sem prefixo PublicAPI
+        ok_t2, res_t2 = consultar_endpoint_f360(jwt_token, "/TitulosPublicAPI/ObterTitulos", payload_datas)
+        if ok_t2:
+            qtd = len(res_t2) if isinstance(res_t2, list) else 0
+            status_diag["titulos"] = {"ok": True, "msg": f"OK ({qtd} títulos carregados)"}
         else:
-            status_diag["titulos"]["msg"] = f"Erro HTTP {r_t.status_code}"
-    except Exception as e:
-        status_diag["titulos"]["msg"] = f"Erro: {str(e)}"
-        
-    # 2. Testar Empresas
-    try:
-        url_e = "https://financas.f360.com.br/PublicAPI/EmpresasPublicAPI/ObterEmpresas"
-        r_e = requests.get(url_e, headers=headers, timeout=8)
-        if r_e.status_code == 200:
-            data_e = r_e.json()
-            qtd_e = len(data_e) if isinstance(data_e, list) else 0
-            status_diag["empresas"] = {"ok": True, "qtd": qtd_e, "msg": f"OK ({qtd_e} empresas)"}
-        else:
-            status_diag["empresas"]["msg"] = f"Erro HTTP {r_e.status_code}"
-    except Exception as e:
-        status_diag["empresas"]["msg"] = f"Erro: {str(e)}"
+            status_diag["titulos"]["msg"] = res_t
 
-    # 3. Testar Caixas / Extrato
-    try:
-        url_c = "https://financas.f360.com.br/PublicAPI/CaixasPublicAPI/ObterCaixas"
-        r_c = requests.get(url_c, headers=headers, timeout=8)
-        if r_c.status_code == 200:
-            data_c = r_c.json()
-            qtd_c = len(data_c) if isinstance(data_c, list) else 0
-            status_diag["caixas"] = {"ok": True, "qtd": qtd_c, "msg": f"OK ({qtd_c} contas/bancos)"}
+    # 2. Extrato / Caixas
+    ok_c, res_c = consultar_endpoint_f360(jwt_token, "/PublicAPI/CaixasPublicAPI/ObterCaixas")
+    if ok_c:
+        qtd = len(res_c) if isinstance(res_c, list) else 0
+        status_diag["caixas"] = {"ok": True, "msg": f"OK ({qtd} contas bancárias)"}
+    else:
+        ok_c2, res_c2 = consultar_endpoint_f360(jwt_token, "/CaixasPublicAPI/ObterCaixas")
+        if ok_c2:
+            qtd = len(res_c2) if isinstance(res_c2, list) else 0
+            status_diag["caixas"] = {"ok": True, "msg": f"OK ({qtd} contas bancárias)"}
         else:
-            status_diag["caixas"]["msg"] = f"Erro HTTP {r_c.status_code}"
-    except Exception as e:
-        status_diag["caixas"]["msg"] = f"Erro: {str(e)}"
+            status_diag["caixas"]["msg"] = res_c
+
+    # 3. Empresas
+    ok_e, res_e = consultar_endpoint_f360(jwt_token, "/PublicAPI/EmpresasPublicAPI/ObterEmpresas")
+    if ok_e:
+        qtd = len(res_e) if isinstance(res_e, list) else 0
+        status_diag["empresas"] = {"ok": True, "msg": f"OK ({qtd} lojas)"}
+    else:
+        ok_e2, res_e2 = consultar_endpoint_f360(jwt_token, "/EmpresasPublicAPI/ObterEmpresas")
+        if ok_e2:
+            qtd = len(res_e2) if isinstance(res_e2, list) else 0
+            status_diag["empresas"] = {"ok": True, "msg": f"OK ({qtd} lojas)"}
+        else:
+            status_diag["empresas"]["msg"] = res_e
 
     return status_diag
 
@@ -231,15 +244,15 @@ with st.sidebar:
     if usar_api_f360:
         jwt_sessao = obter_jwt_token_f360(F360_TOKEN)
         if jwt_sessao:
-            st.success("🟢 Autenticado na API F360!")
-            st.caption("📋 **Status dos Módulos Baixados:**")
+            st.success("🟢 Sessão JWT Ativa na F360!")
+            st.caption("📋 **Status dos Módulos F360:**")
             diag = diagnosticar_modulos_f360(jwt_sessao)
             
             st.write(f"• **Contas a Pagar/Rateio:** {'🟢' if diag['titulos']['ok'] else '🔴'} {diag['titulos']['msg']}")
             st.write(f"• **Extrato/Fluxo Caixa:** {'🟢' if diag['caixas']['ok'] else '🔴'} {diag['caixas']['msg']}")
             st.write(f"• **Cadastro Lojas:** {'🟢' if diag['empresas']['ok'] else '🔴'} {diag['empresas']['msg']}")
         else:
-            st.error("🔴 Falha na Autenticação JWT F360")
+            st.error("🔴 Falha ao gerar Sessão JWT no DoLogin")
     
     st.divider()
     st.header("📥 Relatório ERP (Despesas)")
