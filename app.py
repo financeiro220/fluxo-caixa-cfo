@@ -42,11 +42,17 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# TOKEN API F360
+# TOKEN API F360 E CNPJS
 F360_TOKEN = "11001cbb-792d-45e5-b2f9-03ffc46fe7ed"
 
+LOJAS_CNPJ = [
+    "36.240.923/0001-68", # Pantanal
+    "36.240.923/0002-49", # Estação
+    "36.240.923/0003-20"  # Goiabeiras
+]
+
 # ---------------------------------------------------------
-# AUTENTICAÇÃO E BUSCA DIRETA DE PARCELAS/TÍTULOS F360
+# AUTENTICAÇÃO E BUSCA DIRETA DE PARCELAS POR CNPJ F360
 # ---------------------------------------------------------
 def autenticar_f360(token_api):
     url = "https://financas.f360.com.br/PublicLoginAPI/DoLogin"
@@ -64,38 +70,45 @@ def autenticar_f360(token_api):
     except:
         return None
 
-def buscar_parcelas_diretas_f360(jwt_token, data_ini, data_fim):
+def buscar_parcelas_por_cnpj(jwt_token, data_ini, data_fim):
     headers = {
         "Authorization": f"Bearer {jwt_token}",
         "Content-Type": "application/json"
     }
     
-    # Endpoints de consulta direta de parcelas/títulos conforme Postman F360
+    todas_parcelas = []
+    
     endpoints = [
         "/ParcelaPublicAPI/ObterParcelas",
         "/ParcelaPublicAPI/ListarParcelas",
-        "/TitulosPublicAPI/ObterTitulos",
-        "/PublicAPI/TitulosPublicAPI/ObterTitulos"
+        "/TitulosPublicAPI/ObterTitulos"
     ]
     
-    payload = {
-        "DataInicio": data_ini.strftime("%Y-%m-%d"),
-        "DataFim": data_fim.strftime("%Y-%m-%d")
-    }
-    
-    for ep in endpoints:
-        url = f"https://financas.f360.com.br{ep}"
-        try:
-            r = requests.post(url, json=payload, headers=headers, timeout=8)
-            if r.status_code == 200:
-                res = r.json()
-                dados = res.get("Result") if isinstance(res, dict) and "Result" in res else res
-                if isinstance(dados, list) and len(dados) > 0:
-                    return True, f"🟢 {len(dados)} Títulos/Parcelas carregados via {ep}", dados
-        except:
-            continue
-            
-    return False, "🔴 Nenhuma parcela encontrada na busca direta sem filtro de CNPJ", []
+    for cnpj in LOJAS_CNPJ:
+        cnpj_limpo = cnpj.replace(".", "").replace("/", "").replace("-", "")
+        payloads = [
+            {"DataInicio": data_ini.strftime("%Y-%m-%d"), "DataFim": data_fim.strftime("%Y-%m-%d"), "Cnpj": cnpj},
+            {"DataInicio": data_ini.strftime("%Y-%m-%d"), "DataFim": data_fim.strftime("%Y-%m-%d"), "Cnpj": cnpj_limpo},
+            {"DataInicio": data_ini.strftime("%Y-%m-%d"), "DataFim": data_fim.strftime("%Y-%m-%d"), "CNPJ": cnpj}
+        ]
+        
+        for ep in endpoints:
+            url = f"https://financas.f360.com.br{ep}"
+            for p in payloads:
+                try:
+                    r = requests.post(url, json=p, headers=headers, timeout=6)
+                    if r.status_code == 200:
+                        res = r.json()
+                        dados = res.get("Result") if isinstance(res, dict) and "Result" in res else res
+                        if isinstance(dados, list) and len(dados) > 0:
+                            todas_parcelas.extend(dados)
+                            break
+                except:
+                    continue
+                    
+    if len(todas_parcelas) > 0:
+        return True, f"🟢 {len(todas_parcelas)} Parcelas/Títulos encontrados nas 3 lojas", todas_parcelas
+    return False, "🔴 Nenhuma parcela retornada para o período nos CNPJs", []
 
 def buscar_contas_bancarias_f360(jwt_token):
     url = "https://financas.f360.com.br/ContaBancariaPublicAPI/ListarContasBancarias"
@@ -218,13 +231,13 @@ with st.sidebar:
         jwt_token = autenticar_f360(F360_TOKEN)
         if jwt_token:
             st.success("🟢 Sessão JWT Válida!")
-            d_ini = date(2026, 1, 1)
-            d_fim = date(2026, 12, 31)
+            d_ini = date(2026, 9, 1)
+            d_fim = date(2026, 9, 30)
             
-            ok_parc, msg_parc, _ = buscar_parcelas_diretas_f360(jwt_token, d_ini, d_fim)
+            ok_parc, msg_parc, _ = buscar_parcelas_por_cnpj(jwt_token, d_ini, d_fim)
             ok_cb, msg_cb, _ = buscar_contas_bancarias_f360(jwt_token)
             
-            st.write(f"• **Busca Direta de Títulos:** {msg_parc}")
+            st.write(f"• **Parcelas por CNPJ:** {msg_parc}")
             st.write(f"• **Contas Bancárias:** {msg_cb}")
         else:
             st.error("🔴 Falha ao autenticar token no DoLogin F360")
