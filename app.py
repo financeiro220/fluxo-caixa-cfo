@@ -47,7 +47,7 @@ st.markdown("""
 F360_TOKEN = "11001cbb-792d-45e5-b2f9-03ffc46fe7ed"
 
 # ---------------------------------------------------------
-# VARREDOR AUTOMÁTICO DE ROTAS DA API F360
+# CONEXÃO COM API F360 CONFORME DOCUMENTAÇÃO POSTMAN
 # ---------------------------------------------------------
 @st.cache_data(ttl=300)
 def obter_jwt_token_f360(token):
@@ -64,64 +64,56 @@ def obter_jwt_token_f360(token):
     except:
         return None
 
-def testar_rotas_modulo(jwt_token, lista_urls, payload=None):
+def testar_endpoint_f360(jwt_token, path_endpoint, payload_json=None):
     headers = {
         "Authorization": f"Bearer {jwt_token}",
         "Content-Type": "application/json"
     }
     
-    for url in lista_urls:
+    # Testar variando o prefixo da URL
+    base_urls = [
+        "https://financas.f360.com.br",
+        "https://financas.f360.com.br/PublicAPI"
+    ]
+    
+    for base in base_urls:
+        url = f"{base}{path_endpoint}"
         try:
-            if payload:
-                r = requests.post(url, json=payload, headers=headers, timeout=5)
+            if payload_json:
+                r = requests.post(url, json=payload_json, headers=headers, timeout=6)
             else:
-                r = requests.get(url, headers=headers, timeout=5)
+                r = requests.get(url, headers=headers, timeout=6)
                 
-            if r.status_code == 200:
-                data = r.json()
-                qtd = len(data) if isinstance(data, list) else 1
-                return True, f"🟢 Conectado em {url.split('/')[-1]} ({qtd} itens)", data
+            if r.status_code in [200, 201]:
+                res = r.json()
+                qtd = len(res) if isinstance(res, list) else 1
+                return True, f"🟢 Conectado ({qtd} registros)", res
         except:
             continue
             
-    return False, "🔴 Nenhuma rota ativa respondida", None
+    return False, "🔴 404 - Rota não encontrada", None
 
 def diagnosticar_modulos_f360(jwt_token):
     status_diag = {}
     
+    # Standard Payload F360
     payload_datas = {
         "DataInicio": "2026-09-01",
-        "DataFim": "2026-09-30"
+        "DataFim": "2026-09-30",
+        "DataInicial": "2026-09-01",
+        "DataFinal": "2026-09-30"
     }
     
-    # 1. Rotas Contas a Pagar / Rateio
-    urls_titulos = [
-        "https://financas.f360.com.br/PublicAPI/TitulosPublicAPI/ObterTitulos",
-        "https://financas.f360.com.br/TitulosPublicAPI/ObterTitulos",
-        "https://financas.f360.com.br/api/v1/titulos",
-        "https://financas.f360.com.br/PublicAPI/Titulos/Obter"
-    ]
-    ok_t, msg_t, data_t = testar_rotas_modulo(jwt_token, urls_titulos, payload_datas)
+    # 1. Rateio / Titulos
+    ok_t, msg_t, data_t = testar_endpoint_f360(jwt_token, "/TitulosPublicAPI/ObterTitulos", payload_datas)
     status_diag["titulos"] = {"ok": ok_t, "msg": msg_t, "data": data_t}
 
-    # 2. Rotas Extrato / Caixas
-    urls_caixas = [
-        "https://financas.f360.com.br/PublicAPI/CaixasPublicAPI/ObterCaixas",
-        "https://financas.f360.com.br/CaixasPublicAPI/ObterCaixas",
-        "https://financas.f360.com.br/api/v1/caixas",
-        "https://financas.f360.com.br/PublicAPI/Caixas/Obter"
-    ]
-    ok_c, msg_c, data_c = testar_rotas_modulo(jwt_token, urls_caixas)
+    # 2. Extrato / Caixas
+    ok_c, msg_c, data_c = testar_endpoint_f360(jwt_token, "/CaixasPublicAPI/ObterCaixas", payload_datas)
     status_diag["caixas"] = {"ok": ok_c, "msg": msg_c, "data": data_c}
 
-    # 3. Rotas Cadastro Lojas
-    urls_empresas = [
-        "https://financas.f360.com.br/PublicAPI/EmpresasPublicAPI/ObterEmpresas",
-        "https://financas.f360.com.br/EmpresasPublicAPI/ObterEmpresas",
-        "https://financas.f360.com.br/api/v1/empresas",
-        "https://financas.f360.com.br/PublicAPI/Empresas/Obter"
-    ]
-    ok_e, msg_e, data_e = testar_rotas_modulo(jwt_token, urls_empresas)
+    # 3. Empresas / Lojas
+    ok_e, msg_e, data_e = testar_endpoint_f360(jwt_token, "/EmpresasPublicAPI/ObterEmpresas")
     status_diag["empresas"] = {"ok": ok_e, "msg": msg_e, "data": data_e}
 
     return status_diag
@@ -248,7 +240,7 @@ with st.sidebar:
     st.divider()
     st.header("🍦 Fluxo de Caixa Por Loja")
     file_pantanal = st.file_uploader("Fluxo Pantanal (.xlsx)", type=["xlsx", "xls"], key="p")
-    file_goiabeiras = st.file_uploader("Fluxo Goiabeiras (.xlsx)", type=["xls", "xlsx"], key="g")
+    file_goiabeiras = st.file_uploader("Fluxo Goiabeiras (.xlsx)", type=["xlsx", "xls"], key="g")
     file_estacao = st.file_uploader("Fluxo Estação (.xlsx)", type=["xlsx", "xls"], key="e")
 
 if 'filtro_kpi' not in st.session_state:
