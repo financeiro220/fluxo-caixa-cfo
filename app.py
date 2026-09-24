@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import requests
 import json
+import re
 from datetime import datetime, date, timedelta
 
 # ---------------------------------------------------------
@@ -121,26 +122,38 @@ def categorizar_plano_contas(plano):
         return "5. DESPESAS OPERACIONAIS & VENDAS"
 
 # ---------------------------------------------------------
-# PROCESSADOR ROBUSTO DO JSON GERENCIAL DO F360
+# PROCESSADOR DO JSON GERENCIAL F360 (VENCIMENTO PRECISO)
 # ---------------------------------------------------------
 def processar_json_f360(data_json):
     df = pd.DataFrame(data_json)
     
     df['Valor'] = pd.to_numeric(df['ValorLcto'], errors='coerce').fillna(0)
     df['Plano de Contas'] = df['NomePlanoDeContas'].fillna('Outros')
+    
     df['Status_Clean'] = df['StatusTitulo'].astype(str).apply(
         lambda x: "REALIZADO" if any(s in str(x).lower() for s in ['liquidado', 'conciliado']) else "PENDENTE"
     )
     
-    # TRATAMENTO SEGURO DE DATAS
-    df['Vencimento_dt'] = pd.to_datetime(df['DataCompetencia'], format='%d/%m/%Y', errors='coerce')
-    df_fallback = pd.to_datetime(df['DataDoLcto'], format='%d/%m/%Y', errors='coerce')
-    df['Vencimento_dt'] = df['Vencimento_dt'].fillna(df_fallback)
-    
-    # Remove entradas sem data válida
+    # EXTRAÇÃO INTELIGENTE DA DATA DE VENCIMENTO REAL
+    def extrair_vencimento_real(row):
+        # 1. Se estiver Liquidado/Pago e tiver data de liquidação, considera ela
+        if row['Status_Clean'] == 'REALIZADO' and pd.notna(row.get('Liquidacao')):
+            dt_liq = pd.to_datetime(row['Liquidacao'], errors='coerce')
+            if pd.notna(dt_liq):
+                return dt_liq.tz_localize(None) if dt_liq.tz is not None else dt_liq
+
+        # 2. Utiliza DataDoLcto (Data real de agendamento/vencimento no F360)
+        dt_lcto = pd.to_datetime(row.get('DataDoLcto'), format='%d/%m/%Y', errors='coerce')
+        if pd.notna(dt_lcto):
+            return dt_lcto
+            
+        # 3. Fallback para DataCompetencia
+        dt_comp = pd.to_datetime(row.get('DataCompetencia'), format='%d/%m/%Y', errors='coerce')
+        return dt_comp
+
+    df['Vencimento_dt'] = df.apply(extrair_vencimento_real, axis=1)
     df = df.dropna(subset=['Vencimento_dt']).copy()
     
-    # Garante tipo datetime antes do .dt
     df['Vencimento_dt'] = pd.to_datetime(df['Vencimento_dt'])
     df['Dia'] = df['Vencimento_dt'].dt.day
     
@@ -238,7 +251,7 @@ with st.sidebar:
         if jwt_token:
             st.success("🟢 Sessão JWT Válida!")
             
-            if st.button("🚀 Solicitado Relatório Mês Atual"):
+            if st.button("🚀 Solicitar Relatório F360"):
                 d_ini = date(2026, 9, 1)
                 d_fim = date(2026, 9, 30)
                 ok_sol, msg_sol = solicitar_relatorio_f360(jwt_token, d_ini, d_fim)
