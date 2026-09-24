@@ -5,7 +5,7 @@ import json
 import re
 from datetime import datetime, date, timedelta
 
-# IMPORTAÇÃO DO MÓDULO F360 ATUALIZADO E REFATORADO
+# IMPORTAÇÃO DO MÓDULO F360 ATUALIZADO
 from f360_api import (
     autenticar_f360, 
     buscar_parcelas_f360, 
@@ -62,7 +62,7 @@ MAPA_CNPJ_LOJA = {
 }
 
 # ---------------------------------------------------------
-# CATEGORIZAÇÃO CFO & CARGA VIA API (COM LOG)
+# CATEGORIZAÇÃO CFO & CARGA VIA API
 # ---------------------------------------------------------
 def categorizar_plano_contas(plano):
     if pd.isna(plano):
@@ -220,10 +220,10 @@ def processar_fluxo_caixa_loja(file, nome_loja):
     return df
 
 # ---------------------------------------------------------
-# INTERFACE SIDEBAR E CONSULTAS
+# INTERFACE SIDEBAR
 # ---------------------------------------------------------
 st.markdown("<div class='main-title'>🍦 Gelateria Borelli - Gestão de Fluxo de Caixa</div>", unsafe_allow_html=True)
-st.markdown("<div class='main-subtitle'>Acompanhamento de liquidez, governança e extrato acumulado diário em tempo real</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-subtitle'>Acompanhamento de liquidez, governança e extrato acumulado diário em tempo real (F360 API)</div>", unsafe_allow_html=True)
 
 with st.sidebar:
     st.header("⚡ Integração F360 API")
@@ -235,7 +235,7 @@ with st.sidebar:
             
         if st.session_state.jwt:
             st.success("🟢 Sessão JWT válida")
-            hoje = date(2026, 9, 1) # Período base das franquias
+            hoje = date(2026, 9, 1) # Período base
             periodo_api = st.date_input(
                 "Período de Busca", 
                 (hoje.replace(day=1), hoje + timedelta(days=30)), 
@@ -259,7 +259,7 @@ with st.sidebar:
 
             if btn_receitas and len(periodo_api) == 2:
                 try:
-                    with st.spinner("Consultando parcelas de receitas e cartões..."):
+                    with st.spinner("Consultando parcelas de cartões e receitas..."):
                         df_rec_api = carregar_receitas_api_f360(st.session_state.jwt, periodo_api[0], periodo_api[1], log)
                         st.session_state.df_api_rec = df_rec_api
                         st.success(f"🟢 {len(df_rec_api) if df_rec_api is not None else 0} receitas carregadas!")
@@ -311,7 +311,12 @@ rec_api = st.session_state.get("df_api_rec")
 if rec_api is not None and not rec_api.empty:
     frames_rec.append(rec_api)
 
-tem_cartao_api = (rec_api is not None and not rec_api.empty and "Origem" in rec_api.columns and (rec_api["Origem"] == "Cartão").any())
+tem_cartao_api = (
+    rec_api is not None 
+    and not rec_api.empty 
+    and "Origem" in rec_api.columns 
+    and (rec_api["Origem"] == "Cartão").any()
+)
 
 if file_cartoes is not None and not tem_cartao_api:
     try:
@@ -388,10 +393,25 @@ if df_tudo is not None and not df_tudo.empty:
         df_receitas = df_filtered[df_filtered['Tipo_Movimento'] == 'RECEITA'].copy()
         df_despesas = df_filtered[df_filtered['Tipo_Movimento'] == 'DESPESA'].copy()
 
+        # TRATAMENTO DE RECEITAS QUE NÃO SÃO VENDA (TRANSFERÊNCIAS INTERCOMPANY / MÚTUO)
+        PADRAO_EXCLUIR = ['MÚTUO', 'MUTUO', 'TRANSFER', 'EMPRÉSTIMO', 'EMPRESTIMO', 'APORTE']
+        df_receitas_fora = df_receitas.iloc[0:0]
+        if not df_receitas.empty:
+            planos_rec = sorted(df_receitas['Plano de Contas'].dropna().unique())
+            sugeridos = [p for p in planos_rec if any(k in str(p).upper() for k in PADRAO_EXCLUIR)]
+            
+            excluir = st.sidebar.multiselect(
+                "Receitas a desconsiderar (não são vendas)",
+                planos_rec, 
+                default=sugeridos
+            )
+            df_receitas_fora = df_receitas[df_receitas['Plano de Contas'].isin(excluir)]
+            df_receitas = df_receitas[~df_receitas['Plano de Contas'].isin(excluir)]
+
         df_desp_operacional = df_despesas[df_despesas['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"].copy() if not df_despesas.empty else pd.DataFrame()
         df_desp_mutuo = df_despesas[df_despesas['Categoria_CFO'] == "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"].copy() if not df_despesas.empty else pd.DataFrame()
 
-        # TOTALIZADORES (RECEITA USANDO O VALOR LÍQUIDO REAIS DA CONTA)
+        # TOTALIZADORES
         tot_receita_prevista = df_receitas['Valor'].sum() if not df_receitas.empty else (df_lojas_concat['Entradas'].sum() if not df_lojas_concat.empty else 0.0)
         tot_receita_realizada = df_receitas[df_receitas['Status_Clean'] == 'REALIZADO']['Valor'].sum() if not df_receitas.empty else tot_receita_prevista
         
@@ -417,7 +437,7 @@ if df_tudo is not None and not df_tudo.empty:
                 st.session_state.filtro_kpi = "PENDENTE"
 
         with k4:
-            st.metric("Total Receita Líquida (Caixa)", f"R$ {tot_receita_prevista:,.2f}", delta=f"Realizado: R$ {tot_receita_realizada:,.2f}")
+            st.metric("Total Receita Líquida (Vendas)", f"R$ {tot_receita_prevista:,.2f}", delta=f"Realizado: R$ {tot_receita_realizada:,.2f}")
 
         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -490,25 +510,28 @@ if df_tudo is not None and not df_tudo.empty:
             
             st.dataframe(pd.DataFrame(dre_list), use_container_width=True, hide_index=True)
             
-            # TABELA DE CONFERÊNCIA DE RECEITAS POR ORIGEM (ADQUIRENTE E TÍTULOS)
+            # TABELA DE CONFERÊNCIA DE RECEITAS POR ORIGEM E PLANO DE CONTAS
             if not df_receitas.empty and "Origem" in df_receitas.columns:
                 st.markdown("<br>", unsafe_allow_html=True)
-                st.subheader("🔍 Conferência de Receitas por Origem e Adquirente (Comparativo F360)")
+                st.subheader("🔍 Receitas por Origem e Plano de Contas (Conferir com F360)")
                 
                 df_rec_conf = df_receitas.copy()
                 if "Valor_Bruto" not in df_rec_conf.columns:
                     df_rec_conf["Valor_Bruto"] = df_rec_conf["Valor"]
                     
-                orig = (df_rec_conf.groupby(["Origem", "Detalhe"])
+                orig = (df_rec_conf.groupby(["Origem", "Plano de Contas", "Detalhe"])
                         .agg(Qtd=("Valor", "size"), Bruto=("Valor_Bruto", "sum"), Liquido=("Valor", "sum"))
                         .reset_index())
-                orig["Taxas / Descontos"] = orig["Bruto"] - orig["Liquido"]
+                orig["Taxas"] = orig["Bruto"] - orig["Liquido"]
                 
                 st.dataframe(
-                    orig.style.format({c: "R$ {:,.2f}" for c in ["Bruto", "Liquido", "Taxas / Descontos"]}),
+                    orig.style.format({c: "R$ {:,.2f}" for c in ["Bruto", "Liquido", "Taxas"]}),
                     use_container_width=True, 
                     hide_index=True
                 )
+                
+                if not df_receitas_fora.empty:
+                    st.caption(f"ℹ️ Receitas desconsideradas (não são vendas): **R$ {df_receitas_fora['Valor'].sum():,.2f}**")
             
         with tab2:
             st.subheader("Matriz Diária com Saldo de Encerramento (Fluxo de Caixa F360)")
@@ -582,8 +605,8 @@ else:
         <h3>🍦 Painel de Fluxo de Caixa Executivo - Gelateria Borelli</h3>
         <p>Aguardando carga dos relatórios no menu lateral para inicializar o processamento.</p>
         <ol>
-            <li>Ative a opção <b>Usar API F360 (Tempo Real)</b> e busque despesas/receitas.</li>
-            <li>OU anexe o arquivo de <b>Parcelas de Cartões (export F360)</b> no menu lateral para conciliação exata do V. Líquido.</li>
+            <li>Ative a opção <b>Usar API F360 (Tempo Real)</b> e clique em <b>🚀 Buscar Despesas / Parcelas</b> e <b>📈 Buscar Receitas / Cartões</b>.</li>
+            <li>OU anexe o arquivo de <b>Parcelas de Cartões (export F360)</b> no menu lateral.</li>
         </ol>
     </div>
     """, unsafe_allow_html=True)

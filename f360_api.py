@@ -16,10 +16,8 @@ import requests
 BASE = "https://financas.f360.com.br"
 JANELA_DIAS = 30  # margem sobre o limite de 31 dias por consulta
 
-# Caminho do endpoint de parcelas de cartões. É uma HIPÓTESE baseada no padrão dos
-# outros endpoints: se o diagnóstico mostrar HTTP 404, copie o caminho exato da
-# seção "7 - Parcelas de Cartões" do manual (Postman) e cole aqui.
-CARTOES_ENDPOINT = "ParcelasDeCartaoPublicAPI/ListarParcelasDeCartoes"
+# Endpoint de parcelas de cartões (seção "7 - Parcelas de Cartões" do manual F360).
+CARTOES_ENDPOINT = "ParcelasDeCartoesPublicAPI/ListarParcelasDeCartoes"
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +249,7 @@ _ALIAS = {
     "conta": ["conta", "contaliquidacao", "contadeliquidacao"],
     "liquidacao": ["liquid", "liquidacao", "dataliquidacao"],
     "id": ["id", "parcelaid", "cartaoid"],
+    "modalidade": ["modalidade"],
 }
 
 
@@ -270,14 +269,34 @@ def _pega(reg, chave):
     return None
 
 
+def _achata(reg, saida=None):
+    """Traz para o nível de cima os campos de objetos aninhados (ex.: DadosDoCartao.Adquirente)."""
+    saida = {} if saida is None else saida
+    for k, v in reg.items():
+        saida.setdefault(k, v)
+        if isinstance(v, dict):
+            _achata(v, saida)
+    return saida
+
+
+def _verdadeiro(v):
+    return str(v).strip().lower() == "true"
+
+
 def _normaliza_cartoes(registros, mapa_cnpj):
     mapa = {_so_digitos(k): v for k, v in mapa_cnpj.items()}
     linhas = []
     for i, reg in enumerate(registros):
+        reg = _achata(reg)
+        if _verdadeiro(reg.get("Cancelada")) or _verdadeiro(reg.get("Cancelado")):
+            continue
+
         emp_raw = str(_pega(reg, "empresa") or "").strip()
         empresa = mapa.get(_so_digitos(emp_raw)) or emp_raw or "N/D"
         adq = str(_pega(reg, "adquirente") or "Cartão").strip()
         band = str(_pega(reg, "bandeira") or "").strip()
+        modal = str(_pega(reg, "modalidade") or "").strip()
+        detalhe = adq if (not modal or modal.lower() == adq.lower()) else f"{adq} - {modal}"
 
         bruto = _num(_pega(reg, "bruto"))
         v_liq = _pega(reg, "liquido")
@@ -288,10 +307,10 @@ def _normaliza_cartoes(registros, mapa_cnpj):
             "Número": f"{adq} {band}".strip(),
             "Tipo_Movimento": "RECEITA",
             "Origem": "Cartão",
-            "Detalhe": adq,
+            "Detalhe": detalhe,
             "Empresa": empresa,
             "Conta": str(_pega(reg, "conta") or ""),
-            "Cliente / Fornecedor": f"{adq} ({band})" if band else adq,
+            "Cliente / Fornecedor": f"{adq} ({band})" if band and band.lower() != adq.lower() else adq,
             "Plano de Contas": f"Receita de Vendas ({adq})",
             "Valor": liquido,          # o que efetivamente cai na conta
             "Valor_Bruto": bruto,
@@ -316,19 +335,16 @@ def _normaliza_cartoes(registros, mapa_cnpj):
     return df
 
 
-def _listar_cartoes(jwt, ini, fim, tipo_datas, cnpjs, endpoint):
+def _listar_cartoes(jwt, tipo, ini, fim, tipo_datas, cnpjs, endpoint):
     headers = {"Authorization": f"Bearer {jwt}", "Content-Type": "application/json"}
     url = f"{BASE}/{endpoint.lstrip('/')}"
     pagina, total, saida = 1, 1, []
     while pagina <= total:
-        params = {"pagina": pagina, "inicio": ini.isoformat(), "fim": fim.isoformat(),
-                  "tipoDatas": tipo_datas}
+        params = {"pagina": pagina, "tipo": tipo, "inicio": ini.isoformat(), "fim": fim.isoformat(),
+                  "tipoDatas": tipo_datas, "status": "Todos"}
         if cnpjs:
             params["empresas"] = ",".join(cnpjs)
         r = requests.get(url, headers=headers, params=params, timeout=60)
-        if r.status_code == 404:
-            raise RuntimeError(f"HTTP 404 em '{endpoint}'. Confira o caminho na seção "
-                               f"'7 - Parcelas de Cartões' do manual e ajuste CARTOES_ENDPOINT.")
         if r.status_code != 200:
             raise RuntimeError(f"HTTP {r.status_code} em '{endpoint}': {r.text[:300]}")
         corpo = r.json()
@@ -336,8 +352,7 @@ def _listar_cartoes(jwt, ini, fim, tipo_datas, cnpjs, endpoint):
             raise RuntimeError(f"F360 retornou erro: {str(corpo)[:300]}")
         res = corpo.get("Result") if isinstance(corpo, dict) else corpo
         if isinstance(res, dict):
-            itens = (res.get("Parcelas") or res.get("Itens")
-                     or next((v for v in res.values() if isinstance(v, list)), []))
+            itens = res.get("Parcelas") or []
             total = res.get("QuantidadeDePaginas", 1) or 1
         else:
             itens, total = (res or []), 1
@@ -346,8 +361,12 @@ def _listar_cartoes(jwt, ini, fim, tipo_datas, cnpjs, endpoint):
     return saida
 
 
-def buscar_cartoes_f360(jwt, d_ini, d_fim, mapa_cnpj, endpoint=None, log=None):
-    """Parcelas de cartões por Vencimento e por Liquidação (sem duplicar entre as duas)."""
+def _chave_cartao(it):
+    return str(it.get("ParcelaId") or json.dumps(it, sort_keys=True, default=str))
+
+
+def buscar_cartoes_f360(jwt, d_ini, d_fim, mapa_cnpj, endpoint=None, log=None, tipo="Receita"):
+    """Parcelas de cartões/PIX por Vencimento e por Liquidação (sem duplicar entre as duas)."""
     log = log if log is not None else []
     endpoint = endpoint or CARTOES_ENDPOINT
     cnpjs = [_fmt_cnpj(c) for c in mapa_cnpj]
@@ -355,19 +374,19 @@ def buscar_cartoes_f360(jwt, d_ini, d_fim, mapa_cnpj, endpoint=None, log=None):
     registros, vistos = [], set()
     for td in ("Vencimento", "Liquidação"):
         for ini, fim in _janelas(d_ini, d_fim):
-            rotulo = f"Cartões / {td} {ini:%d/%m/%Y} a {fim:%d/%m/%Y}"
+            rotulo = f"Cartões {tipo} / {td} {ini:%d/%m/%Y} a {fim:%d/%m/%Y}"
             try:
-                itens = _listar_cartoes(jwt, ini, fim, td, cnpjs, endpoint)
+                itens = _listar_cartoes(jwt, tipo, ini, fim, td, cnpjs, endpoint)
                 if not itens and cnpjs:  # fallback sem filtro de empresas
-                    itens = _listar_cartoes(jwt, ini, fim, td, [], endpoint)
+                    itens = _listar_cartoes(jwt, tipo, ini, fim, td, [], endpoint)
                 log.append(f"{rotulo}: {len(itens)} parcelas")
-            except Exception:
+            except Exception as e:
+                log.append(f"{rotulo}: ERRO -> {e}")
                 if td == "Vencimento":
                     raise
-                log.append(f"{rotulo}: falhou (ignorado)")
                 itens = []
             for it in itens:
-                chave = json.dumps(it, sort_keys=True, default=str)
+                chave = _chave_cartao(it)
                 if td == "Vencimento":
                     registros.append(it)
                     vistos.add(chave)
@@ -375,7 +394,7 @@ def buscar_cartoes_f360(jwt, d_ini, d_fim, mapa_cnpj, endpoint=None, log=None):
                     registros.append(it)
 
     if registros:
-        log.append("Campos do 1º item de cartão: " + ", ".join(map(str, list(registros[0].keys())[:30])))
+        log.append("Campos do 1º item de cartão: " + ", ".join(map(str, _achata(registros[0]).keys())))
     return _normaliza_cartoes(registros, mapa_cnpj)
 
 
