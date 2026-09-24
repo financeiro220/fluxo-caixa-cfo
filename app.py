@@ -78,21 +78,138 @@ def categorizar_plano_contas(plano):
     else:
         return "5. DESPESAS OPERACIONAIS & VENDAS"
 
-def carregar_api_f360(jwt_token, d_ini, d_fim, log=None):
-    df_tudo = buscar_parcelas_f360(jwt_token, d_ini, d_fim, MAPA_CNPJ_LOJA, tipo="Ambos", log=log)
-    if not df_tudo.empty:
-        df_tudo["Categoria_CFO"] = df_tudo["Plano de Contas"].apply(categorizar_plano_contas)
-    return df_tudo
+def carregar_despesas_f360(jwt_token, d_ini, d_fim, log=None):
+    df_desp = buscar_parcelas_f360(jwt_token, d_ini, d_fim, MAPA_CNPJ_LOJA, tipo="Despesa", log=log)
+    if df_desp is not None and not df_desp.empty:
+        df_desp["Categoria_CFO"] = df_desp["Plano de Contas"].apply(categorizar_plano_contas)
+        df_desp["Tipo_Movimento"] = "DESPESA"
+    return df_desp
+
+def carregar_receitas_f360(jwt_token, d_ini, d_fim, log=None):
+    df_rec = buscar_parcelas_f360(jwt_token, d_ini, d_fim, MAPA_CNPJ_LOJA, tipo="Receita", log=log)
+    if df_rec is not None and not df_rec.empty:
+        df_rec["Categoria_CFO"] = "0. RECEITAS DE VENDAS"
+        df_rec["Tipo_Movimento"] = "RECEITA"
+    return df_rec
 
 # ---------------------------------------------------------
-# INTERFACE SIDEBAR
+# FUNÇÕES DE CARGA OFFLINE (EXCEL / JSON)
+# ---------------------------------------------------------
+def processar_json_f360(data_json):
+    df = pd.DataFrame(data_json)
+    df['Valor'] = pd.to_numeric(df['ValorLcto'], errors='coerce').fillna(0)
+    df['Plano de Contas'] = df['NomePlanoDeContas'].fillna('Outros')
+    df['Status_Clean'] = df['StatusTitulo'].astype(str).apply(
+        lambda x: "REALIZADO" if any(s in str(x).lower() for s in ['liquidado', 'conciliado']) else "PENDENTE"
+    )
+    
+    def extrair_vencimento(row):
+        if row['Status_Clean'] == 'REALIZADO' and pd.notna(row.get('Liquidacao')):
+            dt_l = pd.to_datetime(row['Liquidacao'], errors='coerce')
+            if pd.notna(dt_l):
+                return dt_l.tz_localize(None) if dt_l.tz is not None else dt_l
+        dt_lcto = pd.to_datetime(row.get('DataDoLcto'), format='%d/%m/%Y', errors='coerce')
+        if pd.notna(dt_lcto):
+            return dt_lcto
+        return pd.to_datetime(row.get('DataCompetencia'), format='%d/%m/%Y', errors='coerce')
+
+    df['Vencimento_dt'] = df.apply(extrair_vencimento, axis=1)
+    df['Vencimento_real'] = pd.to_datetime(df.get('DataDoLcto'), format='%d/%m/%Y', errors='coerce')
+    
+    df = df.dropna(subset=['Vencimento_dt']).copy()
+    df['Vencimento_dt'] = pd.to_datetime(df['Vencimento_dt'])
+    df['Dia'] = df['Vencimento_dt'].dt.day
+    
+    cnpj_limpo = df['CNPJEmpresa'].astype(str).apply(lambda x: re.sub(r'\D', '', x))
+    df['Empresa'] = cnpj_limpo.map(MAPA_CNPJ_LOJA).fillna(df['CNPJEmpresa'])
+    df['Categoria_CFO'] = df['Plano de Contas'].apply(categorizar_plano_contas)
+    df['Cliente / Fornecedor'] = df['ComplemHistorico'].astype(str).apply(lambda x: x.split('-')[0].strip() if '-' in x else x[:30])
+    df['Número'] = df['NumeroTitulo'].fillna('')
+    df['Tipo_Movimento'] = 'DESPESA'
+    
+    df = df[~df['StatusTitulo'].astype(str).str.lower().str.contains('cancelado|baixado', na=False)].copy()
+    return df
+
+@st.cache_data(ttl=3600)
+def processar_arquivo_despesas(file):
+    df_raw = pd.read_excel(file)
+    header_idx = None
+    for idx, row in df_raw.iterrows():
+        row_str = " ".join(row.dropna().astype(str))
+        if "Tipo" in row_str and "Vencimento" in row_str and "Valor Bruto" in row_str:
+            header_idx = idx
+            break
+            
+    if header_idx is not None:
+        df = df_raw.iloc[header_idx + 1:].copy()
+        df.columns = df_raw.iloc[header_idx].values
+    else:
+        df = df_raw.copy()
+        
+    df = df[df['Tipo'].astype(str).str.contains('A Pagar|Pagar', case=False, na=False)].copy()
+    status_invalidos = ['cancelado', 'baixado']
+    df = df[~df['Status'].astype(str).str.lower().apply(lambda x: any(s in x for s in status_invalidos))].copy()
+    
+    df['Valor'] = pd.to_numeric(df['Valor Bruto'], errors='coerce').fillna(0)
+    df['Vencimento_dt'] = pd.to_datetime(df['Vencimento'], errors='coerce')
+    df['Vencimento_real'] = df['Vencimento_dt']
+    df = df.dropna(subset=['Vencimento_dt']).copy()
+    df['Vencimento_dt'] = pd.to_datetime(df['Vencimento_dt'])
+    df['Dia'] = df['Vencimento_dt'].dt.day
+    df['Categoria_CFO'] = df['Plano de Contas'].apply(categorizar_plano_contas)
+    df['Tipo_Movimento'] = 'DESPESA'
+    
+    df['Status_Clean'] = df['Status'].astype(str).apply(
+        lambda x: "REALIZADO" if any(s in str(x) for s in ['Liquidado', 'Conciliado']) else "PENDENTE"
+    )
+    return df
+
+@st.cache_data(ttl=3600)
+def processar_fluxo_caixa_loja(file, nome_loja):
+    xls = pd.ExcelFile(file)
+    sheet_name = 'Fluxo de Caixa' if 'Fluxo de Caixa' in xls.sheet_names else xls.sheet_names[0]
+    df_raw = pd.read_excel(file, sheet_name=sheet_name)
+    
+    header_row = None
+    for idx, row in df_raw.iterrows():
+        row_str = " ".join(row.dropna().astype(str))
+        if "Data" in row_str and "Total" in row_str:
+            header_row = idx
+            break
+            
+    if header_row is not None:
+        df = df_raw.iloc[header_row + 1:].copy()
+        df.columns = df_raw.iloc[header_row].values
+    else:
+        df = df_raw.copy()
+        
+    df.columns = [str(c).strip() for c in df.columns]
+    df['Vencimento_dt'] = pd.to_datetime(df['Data'], errors='coerce')
+    df = df.dropna(subset=['Vencimento_dt']).copy()
+    df['Vencimento_dt'] = pd.to_datetime(df['Vencimento_dt'])
+    df['Dia'] = df['Vencimento_dt'].dt.day
+    
+    cols_total = [i for i, col in enumerate(df.columns) if col == 'Total']
+    if len(cols_total) >= 2:
+        df['Entradas'] = pd.to_numeric(df.iloc[:, cols_total[0]], errors='coerce').fillna(0)
+        df['Saídas'] = pd.to_numeric(df.iloc[:, cols_total[1]], errors='coerce').fillna(0)
+    else:
+        df['Entradas'] = 0.0
+        df['Saídas'] = 0.0
+
+    df['Saldo_Banco'] = pd.to_numeric(df['Saldo'], errors='coerce').fillna(0)
+    df['Empresa'] = nome_loja
+    return df
+
+# ---------------------------------------------------------
+# INTERFACE SIDEBAR - DOIS BOTÕES INDEPENDENTES
 # ---------------------------------------------------------
 st.markdown("<div class='main-title'>🍦 Gelateria Borelli - Gestão de Fluxo de Caixa</div>", unsafe_allow_html=True)
 st.markdown("<div class='main-subtitle'>Acompanhamento de liquidez, governança e extrato acumulado diário em tempo real (F360)</div>", unsafe_allow_html=True)
 
 with st.sidebar:
     st.header("⚡ Integração F360 API")
-    usar_api = st.toggle("Usar API F360 (Tempo Real)", value=True)
+    usar_api = st.toggle("Usar API F360 (Tempo Real)", value=False)
     
     if usar_api:
         if "jwt" not in st.session_state or st.session_state.jwt is None:
@@ -102,38 +219,102 @@ with st.sidebar:
             st.success("🟢 Sessão JWT válida")
             hoje = date(2026, 9, 1) # Período base
             periodo_api = st.date_input(
-                "Período do Fluxo de Caixa", 
+                "Período de Busca", 
                 (hoje.replace(day=1), hoje + timedelta(days=30)), 
                 format="DD/MM/YYYY"
             )
             
-            btn_buscar = st.button("🚀 Consultar Fluxo de Caixa F360", use_container_width=True)
+            st.markdown("---")
+            # BOTÃO 1: DESPESAS
+            btn_despesas = st.button("🚀 Buscar Despesas / Parcelas", use_container_width=True)
             
-            if btn_buscar and len(periodo_api) == 2:
-                log = []
+            # BOTÃO 2: FLUXO DE CAIXA / RECEITAS
+            btn_receitas = st.button("📈 Buscar Fluxo de Caixa / Receitas", use_container_width=True)
+            
+            log = []
+            
+            if btn_despesas and len(periodo_api) == 2:
                 try:
-                    with st.spinner("Consultando Fluxo de Caixa F360 (Contas 17, 51, 61 + Orçamento 2026)..."):
-                        df_res = carregar_api_f360(st.session_state.jwt, periodo_api[0], periodo_api[1], log)
-                        st.session_state.df_api = df_res
-                        st.success("🟢 Fluxo de caixa carregado com sucesso!")
+                    with st.spinner("Buscando parcelas de despesas..."):
+                        df_desp_api = carregar_despesas_f360(st.session_state.jwt, periodo_api[0], periodo_api[1], log)
+                        st.session_state.df_api_desp = df_desp_api
+                        st.success(f"🟢 {len(df_desp_api) if df_desp_api is not None else 0} despesas carregadas!")
                 except Exception as e:
-                    st.error(f"Erro na API F360: {e}")
-                    if "401" in str(e):
-                        st.session_state.jwt = None
-                
-                with st.expander("🔍 Diagnóstico da API"):
-                    st.code("\n".join(log) or "sem chamadas")
+                    st.error(f"Erro ao buscar despesas: {e}")
+
+            if btn_receitas and len(periodo_api) == 2:
+                try:
+                    with st.spinner("Buscando fluxo de caixa e receitas..."):
+                        df_rec_api = carregar_receitas_f360(st.session_state.jwt, periodo_api[0], periodo_api[1], log)
+                        st.session_state.df_api_rec = df_rec_api
+                        st.success(f"🟢 {len(df_rec_api) if df_rec_api is not None else 0} receitas carregadas!")
+                except Exception as e:
+                    st.error(f"Erro ao buscar receitas: {e}")
+                    
+            with st.expander("🔍 Diagnóstico da API"):
+                st.code("\n".join(log) or "sem chamadas na sessão atual")
         else:
             st.error("🔴 Falha na autenticação F360")
+            
+    st.divider()
+    st.header("📥 Relatório ERP / F360 (Offline)")
+    json_f360_file = st.file_uploader("Anexe o Ficheiro JSON F360 (.json)", type=["json"])
+    uploaded_file = st.file_uploader("OU Anexe o Rateio em Excel (.xlsx)", type=["xlsx", "xls"])
+    
+    st.divider()
+    st.header("🍦 Fluxo de Caixa Por Loja")
+    file_pantanal = st.file_uploader("Fluxo Pantanal (.xlsx)", type=["xlsx", "xls"], key="p")
+    file_goiabeiras = st.file_uploader("Fluxo Goiabeiras (.xlsx)", type=["xlsx", "xls"], key="g")
+    file_estacao = st.file_uploader("Fluxo Estação (.xlsx)", type=["xlsx", "xls"], key="e")
 
 if 'filtro_kpi' not in st.session_state:
     st.session_state.filtro_kpi = "PENDENTE"
 
-# FONTE DE DADOS PRINCIPAL
-df_tudo = st.session_state.get("df_api")
+# FONTE DE DADOS COMBINADA
+df_despesas_fonte = None
+df_receitas_fonte = None
+
+if json_f360_file is not None:
+    try:
+        data_j = json.load(json_f360_file)
+        df_despesas_fonte = processar_json_f360(data_j)
+        st.sidebar.success(f"🟢 JSON F360: {len(df_despesas_fonte)} despesas")
+    except Exception as e:
+        st.sidebar.error(f"Erro ao ler JSON: {e}")
+elif uploaded_file is not None:
+    try:
+        df_despesas_fonte = processar_arquivo_despesas(uploaded_file)
+        st.sidebar.success(f"🟢 Rateio Excel: {len(df_despesas_fonte)} despesas")
+    except Exception as e:
+        st.sidebar.error(f"Erro ao ler Excel: {e}")
+else:
+    df_despesas_fonte = st.session_state.get("df_api_desp")
+    df_receitas_fonte = st.session_state.get("df_api_rec")
+
+# UNIFICAÇÃO PARA O DASHBOARD
+df_tudo_list = []
+if df_despesas_fonte is not None and not df_despesas_fonte.empty:
+    df_tudo_list.append(df_despesas_fonte)
+if df_receitas_fonte is not None and not df_receitas_fonte.empty:
+    df_tudo_list.append(df_receitas_fonte)
+
+df_tudo = pd.concat(df_tudo_list, ignore_index=True) if len(df_tudo_list) > 0 else None
 
 if df_tudo is not None and not df_tudo.empty:
     try:
+        if 'Tipo_Movimento' not in df_tudo.columns:
+            df_tudo['Tipo_Movimento'] = 'DESPESA'
+
+        dfs_lojas = []
+        if file_pantanal is not None:
+            dfs_lojas.append(processar_fluxo_caixa_loja(file_pantanal, "4- PANTANAL"))
+        if file_goiabeiras is not None:
+            dfs_lojas.append(processar_fluxo_caixa_loja(file_goiabeiras, "8 - GOIABEIRAS"))
+        if file_estacao is not None:
+            dfs_lojas.append(processar_fluxo_caixa_loja(file_estacao, "5- ESTAÇÃO"))
+            
+        df_lojas_concat = pd.concat(dfs_lojas, ignore_index=True) if len(dfs_lojas) > 0 else pd.DataFrame()
+
         col_filtro1, col_filtro2 = st.columns([2, 1])
         
         min_date = df_tudo['Vencimento_dt'].min().date()
@@ -177,8 +358,8 @@ if df_tudo is not None and not df_tudo.empty:
         df_desp_mutuo = df_despesas[df_despesas['Categoria_CFO'] == "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"].copy()
 
         # TOTALIZADORES
-        tot_receita_prevista = df_receitas['Valor'].sum()
-        tot_receita_realizada = df_receitas[df_receitas['Status_Clean'] == 'REALIZADO']['Valor'].sum()
+        tot_receita_prevista = df_receitas['Valor'].sum() if not df_receitas.empty else (df_lojas_concat['Entradas'].sum() if not df_lojas_concat.empty else 0.0)
+        tot_receita_realizada = df_receitas[df_receitas['Status_Clean'] == 'REALIZADO']['Valor'].sum() if not df_receitas.empty else tot_receita_prevista
         
         tot_previsto = df_desp_operacional['Valor'].sum()
         tot_realizado = df_desp_operacional[df_desp_operacional['Status_Clean'] == 'REALIZADO']['Valor'].sum()
@@ -202,7 +383,7 @@ if df_tudo is not None and not df_tudo.empty:
                 st.session_state.filtro_kpi = "PENDENTE"
 
         with k4:
-            st.metric("Total de Receitas Orçadas / Realizadas", f"R$ {tot_receita_prevista:,.2f}", delta=f"Realizado: R$ {tot_receita_realizada:,.2f}")
+            st.metric("Total de Receitas (API / Lojas)", f"R$ {tot_receita_prevista:,.2f}", delta=f"Realizado: R$ {tot_receita_realizada:,.2f}")
 
         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -213,7 +394,7 @@ if df_tudo is not None and not df_tudo.empty:
             
             dre_list = []
             dre_list.append({
-                "Categoria CFO": "0. RECEITAS DE VENDAS / ENTRADAS (ORÇAMENTO 2026)",
+                "Categoria CFO": "0. RECEITAS DE VENDAS / ENTRADAS (FLUXO / EXTRATO)",
                 "Previsto (R$)": f"R$ {tot_receita_prevista:,.2f}",
                 "Realizado (R$)": f"R$ {tot_receita_realizada:,.2f}",
                 "Variação (R$)": f"R$ {tot_receita_realizada - tot_receita_prevista:,.2f}",
@@ -281,8 +462,8 @@ if df_tudo is not None and not df_tudo.empty:
             df_filtered['Dia'] = pd.to_datetime(df_filtered['Vencimento_dt']).dt.day
             dias_mes = sorted([int(d) for d in df_filtered['Dia'].dropna().unique() if d > 0])
             
-            piv_ent = df_receitas.groupby('Dia')['Valor'].sum()
-            piv_sai = df_despesas[df_despesas['Status_Clean'] == 'REALIZADO'].groupby('Dia')['Valor'].sum()
+            piv_ent = df_receitas.groupby('Dia')['Valor'].sum() if not df_receitas.empty else pd.Series(0.0, index=dias_mes)
+            piv_sai = df_despesas[df_despesas['Status_Clean'] == 'REALIZADO'].groupby('Dia')['Valor'].sum() if not df_despesas.empty else pd.Series(0.0, index=dias_mes)
             
             row_e, row_s, row_liq = {}, {}, {}
             
@@ -296,7 +477,7 @@ if df_tudo is not None and not df_tudo.empty:
                 row_liq[d] = l
                 
             df_extrato_diario = pd.DataFrame([
-                {"Linha de Extrato": "1. (+) Total Receitas (Vendas Orçadas / Realizadas)", **row_e},
+                {"Linha de Extrato": "1. (+) Total Receitas", **row_e},
                 {"Linha de Extrato": "2. (-) Total Saídas Liquidadas", **row_s},
                 {"Linha de Extrato": "3. (=) Resultado Líquido do Dia", **row_liq}
             ])
@@ -310,28 +491,34 @@ if df_tudo is not None and not df_tudo.empty:
             
         with tab3:
             st.subheader("Matriz Comparativa entre Lojas")
-            pivot_store = df_despesas.pivot_table(index='Categoria_CFO', columns='Empresa', values='Valor', aggfunc='sum', fill_value=0)
-            st.dataframe(pivot_store.style.format("R$ {:,.2f}"), use_container_width=True)
+            if not df_despesas.empty:
+                pivot_store = df_despesas.pivot_table(index='Categoria_CFO', columns='Empresa', values='Valor', aggfunc='sum', fill_value=0)
+                st.dataframe(pivot_store.style.format("R$ {:,.2f}"), use_container_width=True)
+            else:
+                st.info("Nenhuma despesa para exibir a comparação por loja.")
 
         st.divider()
 
         # TABELA INFERIOR DE DESPESAS
         if st.session_state.filtro_kpi == "REALIZADO":
-            df_titulos = df_despesas[df_despesas['Status_Clean'] == 'REALIZADO'].copy()
+            df_titulos = df_despesas[df_despesas['Status_Clean'] == 'REALIZADO'].copy() if not df_despesas.empty else pd.DataFrame()
         elif st.session_state.filtro_kpi == "PENDENTE":
-            df_titulos = df_despesas[df_despesas['Status_Clean'] == 'PENDENTE'].copy()
+            df_titulos = df_despesas[df_despesas['Status_Clean'] == 'PENDENTE'].copy() if not df_despesas.empty else pd.DataFrame()
         else:
-            df_titulos = df_despesas.copy()
+            df_titulos = df_despesas.copy() if not df_despesas.empty else pd.DataFrame()
 
-        df_display = df_titulos.copy()
-        df_display['Data de Caixa'] = df_display['Vencimento_dt'].dt.strftime('%d/%m/%Y')
-        
-        st.subheader(f"📊 Exibindo Títulos de Despesas ({len(df_display)} registros)")
-        st.dataframe(
-            df_display[['Número', 'Empresa', 'Cliente / Fornecedor', 'Data de Caixa', 'Valor', 'Plano de Contas', 'Categoria_CFO', 'Status_Clean']],
-            use_container_width=True,
-            hide_index=True
-        )
+        if not df_titulos.empty:
+            df_display = df_titulos.copy()
+            df_display['Data de Caixa'] = df_display['Vencimento_dt'].dt.strftime('%d/%m/%Y')
+            
+            st.subheader(f"📊 Exibindo Títulos de Despesas ({len(df_display)} registros)")
+            st.dataframe(
+                df_display[['Número', 'Empresa', 'Cliente / Fornecedor', 'Data de Caixa', 'Valor', 'Plano de Contas', 'Categoria_CFO', 'Status_Clean']],
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.info("Nenhum título para o filtro selecionado.")
 
     except Exception as e:
         st.error(f"Erro ao processar os dados: {e}")
@@ -341,7 +528,8 @@ else:
         <h3>🍦 Painel de Fluxo de Caixa Executivo - Gelateria Borelli</h3>
         <p>Aguardando carga dos relatórios no menu lateral para inicializar o processamento.</p>
         <ol>
-            <li>Ative a opção <b>Usar API F360 (Tempo Real)</b> no menu lateral e clique em <b>🚀 Consultar Fluxo de Caixa F360</b>.</li>
+            <li>Ative a opção <b>Usar API F360 (Tempo Real)</b> no menu lateral.</li>
+            <li>Clique em <b>🚀 Buscar Despesas / Parcelas</b> ou <b>📈 Buscar Fluxo de Caixa / Receitas</b>.</li>
         </ol>
     </div>
     """, unsafe_allow_html=True)

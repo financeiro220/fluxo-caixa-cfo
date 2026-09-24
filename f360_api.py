@@ -1,6 +1,5 @@
 """
-f360_api.py - Integração em Tempo Real com o Fluxo de Caixa da F360.
-Mapeia Receitas, Despesas e o Plano Orçamentário para as contas 17, 51 e 61.
+f360_api.py - Módulo F360 modular para busca de Parcelas de Despesas e Fluxo de Receitas.
 """
 import requests
 import pandas as pd
@@ -9,8 +8,6 @@ from datetime import datetime, date, timedelta
 
 BASE = "https://financas.f360.com.br"
 JANELA_DIAS = 30
-
-IDS_CONTAS_BORELLI = ["17", "51", "61"]
 
 def autenticar_f360(token_api):
     try:
@@ -44,7 +41,6 @@ def _fmt_cnpj(c):
     return f"{d[:2]}.{d[2:5]}.{d[5:8]}/{d[8:12]}-{d[12:]}" if len(d) == 14 else str(c)
 
 def _listar(jwt, tipo, ini, fim, tipo_datas, cnpjs):
-    """Consulta o Fluxo de Caixa na API F360 (Ambos = Receita + Despesa)."""
     headers = {"Authorization": f"Bearer {jwt}", "Content-Type": "application/json"}
     url = f"{BASE}/ParcelasDeTituloPublicAPI/ListarParcelasDeTitulos"
     pagina, total, saida = 1, 1, []
@@ -52,7 +48,7 @@ def _listar(jwt, tipo, ini, fim, tipo_datas, cnpjs):
     while pagina <= total:
         params = {
             "pagina": pagina,
-            "tipo": tipo,  # "Ambos" para pegar Receitas e Despesas do Fluxo de Caixa
+            "tipo": tipo,  # Despesa | Receita | Ambos
             "inicio": ini.isoformat(),
             "fim": fim.isoformat(),
             "tipoDatas": tipo_datas,
@@ -79,7 +75,7 @@ def _da_rede(p, digitos):
     insc = ((p.get("DadosDoTitulo") or {}).get("Empresa") or {}).get("Inscricao")
     return _so_digitos(insc) in digitos
 
-def _normaliza(parcelas, mapa_cnpj):
+def _normaliza(parcelas, mapa_cnpj, tipo_mov_forçado="DESPESA"):
     mapa = {_so_digitos(k): v for k, v in mapa_cnpj.items()}
     linhas = []
     
@@ -96,26 +92,29 @@ def _normaliza(parcelas, mapa_cnpj):
         realizado = "liquidado" in s_low or "conciliado" in s_low
 
         bruto = float(p.get("ValorBruto") or 0)
-        tipo_movimento = str(p.get("Tipo") or tit.get("Tipo") or "").lower()
         
-        # Classifica se é Entrada (Receita) ou Saída (Despesa)
-        is_receita = "receita" in tipo_movimento or "receber" in tipo_movimento
-        
+        # Identificação de Receita vs Despesa
+        tipo_item = str(p.get("Tipo") or tit.get("Tipo") or "").lower()
+        if "receita" in tipo_item or "receber" in tipo_item:
+            tipo_mov = "RECEITA"
+        elif "despesa" in tipo_item or "pagar" in tipo_item:
+            tipo_mov = "DESPESA"
+        else:
+            tipo_mov = tipo_mov_forçado
+
         rateio = p.get("Rateio") or [{}]
         soma = sum(abs(float(r.get("Valor") or 0)) for r in rateio)
 
         for r in rateio:
             peso = abs(float(r.get("Valor") or 0)) / soma if soma else 1 / len(rateio)
-            val_final = bruto * peso
-            
             linhas.append({
                 "ParcelaId": p.get("ParcelaId"),
                 "Número": p.get("Numero") or tit.get("NumeroDoTitulo", ""),
-                "Tipo_Movimento": "RECEITA" if is_receita else "DESPESA",
+                "Tipo_Movimento": tipo_mov,
                 "Empresa": empresa,
                 "Cliente / Fornecedor": fornecedor,
                 "Plano de Contas": r.get("PlanoDeContas") or "Outros",
-                "Valor": val_final,
+                "Valor": bruto * peso,
                 "Status": status,
                 "Status_Clean": "REALIZADO" if realizado else "PENDENTE",
                 "Vencimento_real": p.get("Vencimento"),
@@ -130,7 +129,6 @@ def _normaliza(parcelas, mapa_cnpj):
     df["Liquidacao_dt"] = pd.to_datetime(df["Liquidacao_raw"], errors="coerce")
     df = df.drop(columns=["Liquidacao_raw"])
 
-    # Data de Caixa: usa Liquidação para realizados e Vencimento para previstos/pendentes
     df["Vencimento_dt"] = df["Liquidacao_dt"].where(
         (df["Status_Clean"] == "REALIZADO") & df["Liquidacao_dt"].notna(),
         df["Vencimento_real"],
@@ -139,11 +137,9 @@ def _normaliza(parcelas, mapa_cnpj):
     df["Dia"] = df["Vencimento_dt"].dt.day
     return df
 
-def buscar_parcelas_f360(jwt, d_ini, d_fim, mapa_cnpj, tipo="Ambos",
+def buscar_parcelas_f360(jwt, d_ini, d_fim, mapa_cnpj, tipo="Despesa",
                          incluir_liquidacao=True, progresso=None, log=None):
-    """
-    Busca o Fluxo de Caixa completo (Receitas + Despesas) no F360.
-    """
+    """Busca despesas ou receitas na API."""
     log = log if log is not None else []
     digitos = {_so_digitos(c) for c in mapa_cnpj}
     cnpjs = [_fmt_cnpj(c) for c in mapa_cnpj]
@@ -153,14 +149,14 @@ def buscar_parcelas_f360(jwt, d_ini, d_fim, mapa_cnpj, tipo="Ambos",
     unicas, passo, total = {}, 0, len(janelas) * len(tipos_data)
     for td in tipos_data:
         for ini, fim in janelas:
-            rotulo = f"Fluxo de Caixa {td} {ini:%d/%m/%Y} a {fim:%d/%m/%Y}"
+            rotulo = f"{tipo} - {td} {ini:%d/%m/%Y} a {fim:%d/%m/%Y}"
             try:
                 itens = _listar(jwt, tipo, ini, fim, td, cnpjs)
-                log.append(f"{rotulo}: {len(itens)} parcelas carregadas")
+                log.append(f"{rotulo}: {len(itens)} itens encontrados")
                 if not itens:
                     todos = _listar(jwt, tipo, ini, fim, td, [])
                     itens = [p for p in todos if _da_rede(p, digitos)]
-                    log.append(f"   sem filtro de empresas: {len(todos)} parcelas, {len(itens)} filtradas")
+                    log.append(f"   sem filtro de empresas: {len(todos)} itens, {len(itens)} filtrados")
             except Exception as e:
                 log.append(f"{rotulo}: ERRO -> {e}")
                 if td == "Vencimento":
@@ -172,4 +168,5 @@ def buscar_parcelas_f360(jwt, d_ini, d_fim, mapa_cnpj, tipo="Ambos",
             if progresso:
                 progresso(passo / total)
 
-    return _normaliza(list(unicas.values()), mapa_cnpj)
+    tipo_mov_forçado = "RECEITA" if tipo == "Receita" else "DESPESA"
+    return _normaliza(list(unicas.values()), mapa_cnpj, tipo_mov_forçado=tipo_mov_forçado)
