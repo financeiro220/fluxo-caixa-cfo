@@ -1,5 +1,10 @@
 """
-f360_api.py - Módulo F360 com busca unificada de Títulos, Cartões/Adquirentes e Mapeamento por Conta Bancária.
+f360_api.py - Integração com a API pública do F360.
+
+- Parcelas de títulos (despesas e receitas)      -> ParcelasDeTituloPublicAPI/ListarParcelasDeTitulos
+- Parcelas de cartões (RedeCard, iFood, etc.)    -> ParcelasDeCartoesPublicAPI/ListarParcelasDeCartoes
+- Leitura do export "Parcelas de Cartões" do F360 (xlsx/csv) como alternativa à API
+- Leitura do relatório nativo "Detalhes Fluxo de Caixa.xlsx" (5 abas) exportado do F360
 """
 import json
 import re
@@ -17,7 +22,9 @@ CARTOES_ENDPOINT = "ParcelasDeCartoesPublicAPI/ListarParcelasDeCartoes"
 IDS_CONTAS_BORELLI = {
     "17": "17 Pantanal Itaú",
     "51": "51 Estação Itaú",
-    "61": "61 Itaú Goiabeiras"
+    "61": "61 Itaú Goiabeiras",
+    "52": "52 RT",
+    "36": "36 MJL"
 }
 
 def autenticar_f360(token_api):
@@ -88,13 +95,19 @@ def _data(v):
     return ts
 
 def _mapear_conta_para_loja(conta_str):
-    c = str(conta_str or "")
-    if "17" in c or "PANTANAL" in c.upper():
+    c = str(conta_str or "").strip()
+    c_upper = c.upper()
+    
+    if "17" in c or "PANTANAL" in c_upper:
         return "17 Pantanal Itaú"
-    elif "51" in c or "ESTAÇÃO" in c.upper() or "ESTACAO" in c.upper():
+    elif "51" in c or "ESTAÇÃO" in c_upper or "ESTACAO" in c_upper:
         return "51 Estação Itaú"
-    elif "61" in c or "GOIABEIRAS" in c.upper():
+    elif "61" in c or "GOIABEIRAS" in c_upper:
         return "61 Itaú Goiabeiras"
+    elif "52" in c or "RT" in c_upper:
+        return "52 RT"
+    elif "36" in c or "MJL" in c_upper:
+        return "36 MJL"
     return c or "17 Pantanal Itaú"
 
 # ---------------------------------------------------------------------------
@@ -464,7 +477,7 @@ def processar_detalhes_fluxo_caixa(arquivos, mapa_cnpj):
     return df, brutos
 
 # ---------------------------------------------------------------------------
-# FUNÇÃO PRINCIPAL DA API (BUSCA TÍTULOS + CARTÕES AUTOMATICAMENTE)
+# FUNÇÃO PRINCIPAL DA API
 # ---------------------------------------------------------------------------
 def buscar_parcelas_f360(jwt, d_ini, d_fim, mapa_cnpj, tipo="Despesa",
                          incluir_liquidacao=True, progresso=None, log=None):

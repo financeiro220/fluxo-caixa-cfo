@@ -121,7 +121,7 @@ def carregar_detalhes_fluxo_caixa(_arquivos, nomes):
 # INTERFACE SIDEBAR
 # ---------------------------------------------------------
 st.markdown("<div class='main-title'>🍦 Gelateria Borelli - Gestão de Fluxo de Caixa</div>", unsafe_allow_html=True)
-st.markdown("<div class='main-subtitle'>Extrato Diário por Contas Bancárias (17 Pantanal Itaú, 51 Estação Itaú e 61 Itaú Goiabeiras)</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-subtitle'>Extrato Diário por Contas Bancárias (17 Pantanal Itaú, 51 Estação Itaú, 61 Itaú Goiabeiras, 52 RT e 36 MJL)</div>", unsafe_allow_html=True)
 
 with st.sidebar:
     st.header("⚡ Integração F360 API")
@@ -237,8 +237,8 @@ if df_tudo is not None and not df_tudo.empty:
         max_date = df_tudo['Vencimento_dt'].max().date()
         
         with col_filtro1:
-            st.caption("🏦 **Pesquisar por Conta Bancária (17, 51 e 61):**")
-            contas_disponiveis = ["17 Pantanal Itaú", "51 Estação Itaú", "61 Itaú Goiabeiras"]
+            st.caption("🏦 **Pesquisar por Conta Bancária:**")
+            contas_disponiveis = ["17 Pantanal Itaú", "51 Estação Itaú", "61 Itaú Goiabeiras", "52 RT", "36 MJL"]
             contas_opcoes = ["Ver Todas as Contas"] + contas_disponiveis
             conta_selecionada = st.radio("", contas_opcoes, horizontal=True)
 
