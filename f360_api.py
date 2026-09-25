@@ -1,10 +1,6 @@
 """
-f360_api.py - Integração com a API pública do F360.
-
-- Parcelas de títulos (despesas e receitas)      -> ParcelasDeTituloPublicAPI/ListarParcelasDeTitulos
-- Parcelas de cartões (RedeCard, iFood, etc.)    -> ParcelasDeCartoesPublicAPI/ListarParcelasDeCartoes
-- Leitura do export "Parcelas de Cartões" do F360 (xlsx/csv) como alternativa à API
-- Leitura do relatório nativo "Detalhes Fluxo de Caixa.xlsx" (5 abas) exportado do F360
+f360_api.py - Integração com a API pública e Leitura do Relatório Nativo F360.
+Correção de parsing de datas de liquidação (DD/MM/YYYY) e normalização de contas bancárias.
 """
 import json
 import re
@@ -78,18 +74,23 @@ def _num(v):
         return 0.0
 
 def _data(v):
+    """Trata estritamente datas no formato brasileiro DD/MM/YYYY e ISO, removendo fusos."""
     if v is None or (not isinstance(v, str) and pd.isna(v)):
         return pd.NaT
     if isinstance(v, str):
         s = v.strip()
         if not s:
             return pd.NaT
-        if re.match(r"^\d{2}/\d{2}/\d{4}", s):
-            ts = pd.to_datetime(s[:10], format="%d/%m/%Y", errors="coerce")
+        # Prioriza o padrão DD/MM/YYYY
+        m = re.search(r"(\d{2})/(\d{2})/(\d{4})", s)
+        if m:
+            d, m_m, y = m.groups()
+            return pd.to_datetime(f"{y}-{m_m}-{d}", errors="coerce")
         else:
-            ts = pd.to_datetime(s, errors="coerce")
+            ts = pd.to_datetime(s, dayfirst=True, errors="coerce")
     else:
         ts = pd.to_datetime(v, errors="coerce")
+    
     if pd.notna(ts) and getattr(ts, "tzinfo", None) is not None:
         ts = ts.tz_localize(None)
     return ts
@@ -150,7 +151,7 @@ def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
 
         tit = p.get("DadosDoTitulo") or {}
         fornecedor = (tit.get("ClienteFornecedor") or {}).get("Nome", "") or ""
-        realizado = "liquidado" in s_low or "conciliado" in s_low
+        realizado = "liquidado" in s_low or "conciliado" in s_low or pd.notna(p.get("Liquidacao"))
         bruto = float(p.get("ValorBruto") or 0)
         conta_raw = str(p.get("Conta") or "")
         conta_loja = _mapear_conta_para_loja(conta_raw)
@@ -196,8 +197,9 @@ def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
     df["Vencimento_real"] = pd.to_datetime(df["Vencimento_real"], errors="coerce")
     df["Liquidacao_dt"] = pd.to_datetime(df["Liquidacao_dt"], errors="coerce")
 
+    # Data de caixa do extrato: Liquidação se realizada, senão Vencimento
     df["Vencimento_dt"] = df["Liquidacao_dt"].where(
-        (df["Status_Clean"] == "REALIZADO") & df["Liquidacao_dt"].notna(),
+        df["Liquidacao_dt"].notna(),
         df["Vencimento_real"],
     )
     df = df.dropna(subset=["Vencimento_dt"]).copy()
@@ -285,8 +287,11 @@ def _normaliza_cartoes(registros, mapa_cnpj):
     for c in ("Data_Venda", "Vencimento_real", "Liquidacao_dt"):
         df[c] = pd.to_datetime(df[c], errors="coerce")
 
+    # Todo cartão com data de liquidação preenchida é REALIZADO no extrato
     df["Status_Clean"] = df["Liquidacao_dt"].notna().map({True: "REALIZADO", False: "PENDENTE"})
     df["Status"] = df["Status_Clean"].map({"REALIZADO": "Liquidado", "PENDENTE": "A receber"})
+    
+    # A data do caixa para o extrato bancário É A LIQUIDAÇÃO
     df["Vencimento_dt"] = df["Liquidacao_dt"].where(df["Liquidacao_dt"].notna(), df["Vencimento_real"])
     df = df.dropna(subset=["Vencimento_dt"]).copy()
     df["Dia"] = df["Vencimento_dt"].dt.day
