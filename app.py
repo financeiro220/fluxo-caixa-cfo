@@ -380,20 +380,25 @@ if df_tudo is not None and not df_tudo.empty:
         with tab2:
             st.subheader("Matriz Diária com Saldo de Encerramento (Visão Extrato Bancário F360)")
             
-            df_filtered['Dia'] = pd.to_datetime(df_filtered['Vencimento_dt']).dt.day
-            dias_mes = sorted([int(d) for d in df_filtered['Dia'].dropna().unique() if d > 0])
+            # GARANTE A SEQUÊNCIA DE TODOS OS DIAS DO PERÍODO SELECIONADO (EX: 1 A 30)
+            if isinstance(date_range, tuple) and len(date_range) == 2:
+                s_date, e_date = date_range
+                dias_mes = list(range(s_date.day, e_date.day + 1))
+            else:
+                df_filtered['Dia'] = pd.to_datetime(df_filtered['Vencimento_dt']).dt.day
+                dias_mes = sorted([int(d) for d in df_filtered['Dia'].dropna().unique() if d > 0])
             
             # 1. Vendas puras
-            piv_ent_vendas = df_rec_vendas[df_rec_vendas['Status_Clean'] == 'REALIZADO'].groupby('Dia')['Valor'].sum() if not df_rec_vendas.empty else pd.Series(0.0, index=dias_mes)
+            piv_ent_vendas = df_rec_vendas[df_rec_vendas['Status_Clean'] == 'REALIZADO'].groupby(df_rec_vendas['Vencimento_dt'].dt.day)['Valor'].sum() if not df_rec_vendas.empty else pd.Series(0.0, index=dias_mes)
             
             # 2. Transferências de Entrada (Mútuo)
-            piv_transf_in = df_rec_mutuo[df_rec_mutuo['Status_Clean'] == 'REALIZADO'].groupby('Dia')['Valor'].sum() if not df_rec_mutuo.empty else pd.Series(0.0, index=dias_mes)
+            piv_transf_in = df_rec_mutuo[df_rec_mutuo['Status_Clean'] == 'REALIZADO'].groupby(df_rec_mutuo['Vencimento_dt'].dt.day)['Valor'].sum() if not df_rec_mutuo.empty else pd.Series(0.0, index=dias_mes)
             
             # 3. Saídas operacionais
-            piv_sai_op = df_desp_operacional[df_desp_operacional['Status_Clean'] == 'REALIZADO'].groupby('Dia')['Valor'].sum() if not df_desp_operacional.empty else pd.Series(0.0, index=dias_mes)
+            piv_sai_op = df_desp_operacional[df_desp_operacional['Status_Clean'] == 'REALIZADO'].groupby(df_desp_operacional['Vencimento_dt'].dt.day)['Valor'].sum() if not df_desp_operacional.empty else pd.Series(0.0, index=dias_mes)
             
             # 4. Transferências de Saída (Empréstimo Mútuo)
-            piv_transf_out = df_desp_mutuo[df_desp_mutuo['Status_Clean'] == 'REALIZADO'].groupby('Dia')['Valor'].sum() if not df_desp_mutuo.empty else pd.Series(0.0, index=dias_mes)
+            piv_transf_out = df_desp_mutuo[df_desp_mutuo['Status_Clean'] == 'REALIZADO'].groupby(df_desp_mutuo['Vencimento_dt'].dt.day)['Valor'].sum() if not df_desp_mutuo.empty else pd.Series(0.0, index=dias_mes)
 
             row_s_ini, row_vendas, row_tin, row_tot_ent, row_saidas, row_tout, row_tot_sai, row_liq_op, row_saldo_final = {}, {}, {}, {}, {}, {}, {}, {}, {}
 
@@ -417,7 +422,7 @@ if df_tudo is not None and not df_tudo.empty:
                 liq_op = v - s
                 s_final = s_inicial + tot_e - tot_s
                 
-                saldo_acumulado = s_final  # Transporta para o dia seguinte
+                saldo_acumulado = s_final  # Transporta sem lacunas para o dia seguinte
                 
                 row_s_ini[d] = s_inicial
                 row_vendas[d] = v
