@@ -70,10 +70,8 @@ MAPA_CNPJ_LOJA = {
 def categorizar_plano_contas(plano):
     if pd.isna(plano):
         return "5. DESPESAS OPERACIONAIS & VENDAS"
-    
     p = str(plano).upper().strip()
-    
-    if any(k in p for k in ['MÚTUO', 'MUTUO', 'TRANSFERÊNCIA', 'TRANSFERENCIA', 'MUMTUO']):
+    if any(k in p for k in ['EMPRÉSTIMO MÚTUO', 'EMPRESTIMO MUTUO', 'MÚTUO', 'MUTUO', 'TRANSFERÊNCIA INTERCOMPANY']):
         return "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"
     elif any(k in p for k in ['CMV', 'DESCARTÁVEIS', 'DESCARTAVEIS', 'PRODUTO PARA REVENDA', 'LEITE', 'INSUMOS', 'MEC3', 'BOBINAS', 'FRUTAS', 'RIBERFOODS']):
         return "1. FORNECEDORES / MERCADORIAS (CMV)"
@@ -89,10 +87,10 @@ def categorizar_plano_contas(plano):
         return "5. DESPESAS OPERACIONAIS & VENDAS"
 
 def categorizar_receita(row, chaves_lojas):
-    """Verifica se a Pessoa (Cliente/Fornecedor) é outra loja da rede."""
-    pessoa = str(row.get("Cliente / Fornecedor") or "")
+    plano = str(row.get("Plano de Contas") or "").upper().strip()
+    pessoa = str(row.get("Cliente / Fornecedor") or "").strip()
     pessoa_norm = unicodedata.normalize("NFKD", pessoa).encode("ascii", "ignore").decode().upper()
-    if any(k in pessoa_norm for k in chaves_lojas):
+    if any(k in plano for k in ['MÚTUO', 'MUTUO', 'EMPRÉSTIMO MÚTUO', 'EMPRESTIMO MUTUO', 'TRANSFERÊNCIA']) or any(k in pessoa_norm for k in chaves_lojas):
         return "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"
     return "0. RECEITAS DE VENDAS"
 
@@ -582,28 +580,43 @@ if df_tudo is not None and not df_tudo.empty:
             df_filtered['Dia'] = pd.to_datetime(df_filtered['Vencimento_dt']).dt.day
             dias_mes = sorted([int(d) for d in df_filtered['Dia'].dropna().unique() if d > 0])
             
-            piv_ent = df_rec_vendas.groupby('Dia')['Valor'].sum() if not df_rec_vendas.empty else pd.Series(0.0, index=dias_mes)
-            piv_sai = df_despesas[df_despesas['Status_Clean'] == 'REALIZADO'].groupby('Dia')['Valor'].sum() if not df_despesas.empty else pd.Series(0.0, index=dias_mes)
-            piv_transf_in = df_rec_mutuo[df_rec_mutuo['Status_Clean'] == 'REALIZADO'].groupby('Dia')['Valor'].sum() if not df_rec_mutuo.empty else pd.Series(dtype=float)
-            piv_transf_out = df_desp_mutuo[df_desp_mutuo['Status_Clean'] == 'REALIZADO'].groupby('Dia')['Valor'].sum() if not df_desp_mutuo.empty else pd.Series(dtype=float)
+            # Vendas puras (sem mútuo)
+            piv_ent_vendas = df_rec_vendas[df_rec_vendas['Status_Clean'] == 'REALIZADO'].groupby('Dia')['Valor'].sum() if not df_rec_vendas.empty else pd.Series(0.0, index=dias_mes)
+            
+            # Transferências de entrada (Mútuo / Intercompany)
+            piv_transf_in = df_rec_mutuo[df_rec_mutuo['Status_Clean'] == 'REALIZADO'].groupby('Dia')['Valor'].sum() if not df_rec_mutuo.empty else pd.Series(0.0, index=dias_mes)
+            
+            # Saídas operacionais (sem mútuo)
+            piv_sai_op = df_desp_operacional[df_desp_operacional['Status_Clean'] == 'REALIZADO'].groupby('Dia')['Valor'].sum() if not df_desp_operacional.empty else pd.Series(0.0, index=dias_mes)
+            
+            # Transferências de saída (Empréstimo Mútuo / Intercompany)
+            piv_transf_out = df_desp_mutuo[df_desp_mutuo['Status_Clean'] == 'REALIZADO'].groupby('Dia')['Valor'].sum() if not df_desp_mutuo.empty else pd.Series(0.0, index=dias_mes)
 
-            row_e, row_s, row_transf, row_liq = {}, {}, {}, {}
+            row_vendas, row_tin, row_saidas, row_tout, row_liq_op, row_liq_final = {}, {}, {}, {}, {}, {}
 
             for d in dias_mes:
-                e = piv_ent.get(d, 0.0)
-                s = piv_sai.get(d, 0.0)
-                t = piv_transf_in.get(d, 0.0) - piv_transf_out.get(d, 0.0)
+                v = piv_ent_vendas.get(d, 0.0)
+                tin = piv_transf_in.get(d, 0.0)
+                s = piv_sai_op.get(d, 0.0)
+                tout = piv_transf_out.get(d, 0.0)
                 
-                row_e[d] = e
-                row_s[d] = s
-                row_transf[d] = t
-                row_liq[d] = e - s + t
+                liq_op = v - s
+                liq_final = (v + tin) - (s + tout)
+                
+                row_vendas[d] = v
+                row_tin[d] = tin
+                row_saidas[d] = s
+                row_tout[d] = tout
+                row_liq_op[d] = liq_op
+                row_liq_final[d] = liq_final
 
             df_extrato_diario = pd.DataFrame([
-                {"Linha de Extrato": "1. (+) Total Vendas Liquidadas", **row_e},
-                {"Linha de Extrato": "2. (-) Total Saídas Liquidadas", **row_s},
-                {"Linha de Extrato": "3. (+/-) Transferências entre Empresas", **row_transf},
-                {"Linha de Extrato": "4. (=) Resultado Líquido do Dia (com transferências)", **row_liq}
+                {"Linha de Extrato": "1. (+) Total Vendas Liquidadas", **row_vendas},
+                {"Linha de Extrato": "2. (+) Transferências Recebidas (Mútuo / Entradas)", **row_tin},
+                {"Linha de Extrato": "3. (-) Total Saídas / Despesas Liquidadas", **row_saidas},
+                {"Linha de Extrato": "4. (-) Transferências Concedidas (Empréstimo Mútuo / Saídas)", **row_tout},
+                {"Linha de Extrato": "5. (=) Resultado Líquido Operacional (Vendas - Saídas)", **row_liq_op},
+                {"Linha de Extrato": "6. (=) Resultado Líquido Final de Caixa (Com Transferências)", **row_liq_final}
             ])
             
             cols_order = ["Linha de Extrato"] + dias_mes
