@@ -177,6 +177,15 @@ with st.sidebar:
             st.error("🔴 Falha na autenticação F360")
             
     st.divider()
+    st.header("🏦 Saldo Inicial de Caixa")
+    saldo_inicial_input = st.number_input(
+        "Saldo Inicial no dia 1 do período (R$):", 
+        value=0.0, 
+        step=100.0,
+        format="%.2f"
+    )
+
+    st.divider()
     st.header("🧾 Detalhes Fluxo de Caixa (F360, fonte oficial)")
     files_detalhes = st.file_uploader(
         "Exporte em F360 > Fluxo de Caixa > Detalhes (Anexe os arquivos)",
@@ -386,9 +395,13 @@ if df_tudo is not None and not df_tudo.empty:
             # 4. Transferências de Saída (Empréstimo Mútuo)
             piv_transf_out = df_desp_mutuo[df_desp_mutuo['Status_Clean'] == 'REALIZADO'].groupby('Dia')['Valor'].sum() if not df_desp_mutuo.empty else pd.Series(0.0, index=dias_mes)
 
-            row_vendas, row_tin, row_tot_ent, row_saidas, row_tout, row_tot_sai, row_liq_op, row_liq_final = {}, {}, {}, {}, {}, {}, {}, {}
+            row_s_ini, row_vendas, row_tin, row_tot_ent, row_saidas, row_tout, row_tot_sai, row_liq_op, row_saldo_final = {}, {}, {}, {}, {}, {}, {}, {}, {}
+
+            saldo_acumulado = float(saldo_inicial_input)
 
             for d in dias_mes:
+                s_inicial = saldo_acumulado
+                
                 v = piv_ent_vendas.get(d, 0.0)
                 tin = piv_transf_in.get(d, 0.0)
                 tot_e = v + tin
@@ -398,8 +411,11 @@ if df_tudo is not None and not df_tudo.empty:
                 tot_s = s + tout
                 
                 liq_op = v - s
-                liq_final = tot_e - tot_s
+                s_final = s_inicial + tot_e - tot_s
                 
+                saldo_acumulado = s_final  # Transporta o saldo para o dia seguinte
+                
+                row_s_ini[d] = s_inicial
                 row_vendas[d] = v
                 row_tin[d] = tin
                 row_tot_ent[d] = tot_e
@@ -409,9 +425,10 @@ if df_tudo is not None and not df_tudo.empty:
                 row_tot_sai[d] = tot_s
                 
                 row_liq_op[d] = liq_op
-                row_liq_final[d] = liq_final
+                row_saldo_final[d] = s_final
 
             df_extrato_diario = pd.DataFrame([
+                {"Linha de Extrato": "0. 🏦 SALDO INICIAL DO DIA (Transportado)", **row_s_ini},
                 {"Linha de Extrato": "1. (+) Total Vendas Liquidadas", **row_vendas},
                 {"Linha de Extrato": "2. (+) Transferências Recebidas (Mútuo / Entradas)", **row_tin},
                 {"Linha de Extrato": "3. (=) TOTAL DE ENTRADAS (Vendas + Transferências)", **row_tot_ent},
@@ -419,7 +436,7 @@ if df_tudo is not None and not df_tudo.empty:
                 {"Linha de Extrato": "5. (-) Transferências Concedidas (Empréstimo Mútuo / Saídas)", **row_tout},
                 {"Linha de Extrato": "6. (=) TOTAL DE SAÍDAS (Despesas + Transferências)", **row_tot_sai},
                 {"Linha de Extrato": "7. (=) Resultado Líquido Operacional (Vendas - Saídas)", **row_liq_op},
-                {"Linha de Extrato": "8. (=) Resultado Líquido Final de Caixa (Entradas - Saídas)", **row_liq_final}
+                {"Linha de Extrato": "8. 🏦 SALDO FINAL EM CONTA BANCÁRIA (Inicial + Entradas - Saídas)", **row_saldo_final}
             ])
             
             cols_order = ["Linha de Extrato"] + dias_mes
