@@ -393,9 +393,17 @@ def buscar_cartoes_f360(jwt, d_ini, d_fim, mapa_cnpj, endpoint=None, log=None, t
                 elif chave not in vistos:
                     registros.append(it)
 
-    if registros:
-        log.append("Campos do 1º item de cartão: " + ", ".join(map(str, _achata(registros[0]).keys())))
-    return _normaliza_cartoes(registros, mapa_cnpj)
+    df_c = _normaliza_cartoes(registros, mapa_cnpj)
+    if not df_c.empty:
+        resumo = (df_c.groupby("Detalhe")
+                  .agg(Qtd=("Valor", "size"), Liquido=("Valor", "sum"))
+                  .sort_values("Liquido", ascending=False))
+        log.append("Composição dos cartões (Detalhe | Qtd | Líquido):")
+        for det, row in resumo.iterrows():
+            log.append(f"   {det}: {int(row['Qtd'])} | R$ {row['Liquido']:,.2f}")
+        tem_ifood = any("ifood" in str(d).lower() for d in resumo.index)
+        log.append(f"iFood encontrado: {'SIM' if tem_ifood else 'NÃO — confira tipoDatas/filtro'}")
+    return df_c
 
 
 def processar_parcelas_cartoes_arquivo(arquivo, mapa_cnpj):

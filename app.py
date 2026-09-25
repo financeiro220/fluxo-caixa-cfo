@@ -62,7 +62,7 @@ MAPA_CNPJ_LOJA = {
 }
 
 # ---------------------------------------------------------
-# CATEGORIZAÇÃO CFO & CARGA VIA API
+# CATEGORIZAÇÃO DE PLANOS DE CONTAS
 # ---------------------------------------------------------
 def categorizar_plano_contas(plano):
     if pd.isna(plano):
@@ -85,23 +85,34 @@ def categorizar_plano_contas(plano):
     else:
         return "5. DESPESAS OPERACIONAIS & VENDAS"
 
+def categorizar_receita(plano):
+    """Separa vendas operacionais puras de transferências e mútuos entre contas."""
+    if pd.isna(plano):
+        return "0. RECEITAS DE VENDAS"
+    p = str(plano).upper().strip()
+    if any(k in p for k in ['MÚTUO', 'MUTUO', 'TRANSFER', 'EMPRÉSTIMO', 'EMPRESTIMO', 'APORTE']):
+        return "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"
+    return "0. RECEITAS DE VENDAS"
+
 def carregar_despesas_api_f360(jwt_token, d_ini, d_fim, log=None):
     df_desp = buscar_parcelas_f360(jwt_token, d_ini, d_fim, MAPA_CNPJ_LOJA, tipo="Despesa", log=log)
     if df_desp is not None and not df_desp.empty:
         df_desp["Categoria_CFO"] = df_desp["Plano de Contas"].apply(categorizar_plano_contas)
     return df_desp
 
-def carregar_receitas_api_f360(jwt_token, d_ini, d_fim, log=None):
+def carregar_receitas_f360(jwt_token, d_ini, d_fim, log=None):
     df_rec = buscar_parcelas_f360(jwt_token, d_ini, d_fim, MAPA_CNPJ_LOJA, tipo="Receita", log=log)
     if df_rec is not None and not df_rec.empty:
-        df_rec["Categoria_CFO"] = "0. RECEITAS DE VENDAS"
+        df_rec["Categoria_CFO"] = df_rec["Plano de Contas"].apply(categorizar_receita)
+        df_rec["Tipo_Movimento"] = "RECEITA"
     return df_rec
 
 @st.cache_data(ttl=3600)
 def carregar_cartoes_arquivo(file):
     df = processar_parcelas_cartoes_arquivo(file, MAPA_CNPJ_LOJA)
     if not df.empty:
-        df["Categoria_CFO"] = "0. RECEITAS DE VENDAS"
+        df["Categoria_CFO"] = df["Plano de Contas"].apply(categorizar_receita)
+        df["Tipo_Movimento"] = "RECEITA"
     return df
 
 # ---------------------------------------------------------
@@ -260,7 +271,7 @@ with st.sidebar:
             if btn_receitas and len(periodo_api) == 2:
                 try:
                     with st.spinner("Consultando parcelas de cartões e receitas..."):
-                        df_rec_api = carregar_receitas_api_f360(st.session_state.jwt, periodo_api[0], periodo_api[1], log)
+                        df_rec_api = carregar_receitas_f360(st.session_state.jwt, periodo_api[0], periodo_api[1], log)
                         st.session_state.df_api_rec = df_rec_api
                         st.success(f"🟢 {len(df_rec_api) if df_rec_api is not None else 0} receitas carregadas!")
                 except Exception as e:
@@ -393,32 +404,23 @@ if df_tudo is not None and not df_tudo.empty:
         df_receitas = df_filtered[df_filtered['Tipo_Movimento'] == 'RECEITA'].copy()
         df_despesas = df_filtered[df_filtered['Tipo_Movimento'] == 'DESPESA'].copy()
 
-        # TRATAMENTO DE RECEITAS QUE NÃO SÃO VENDA (TRANSFERÊNCIAS INTERCOMPANY / MÚTUO)
-        PADRAO_EXCLUIR = ['MÚTUO', 'MUTUO', 'TRANSFER', 'EMPRÉSTIMO', 'EMPRESTIMO', 'APORTE']
-        df_receitas_fora = df_receitas.iloc[0:0]
-        if not df_receitas.empty:
-            planos_rec = sorted(df_receitas['Plano de Contas'].dropna().unique())
-            sugeridos = [p for p in planos_rec if any(k in str(p).upper() for k in PADRAO_EXCLUIR)]
-            
-            excluir = st.sidebar.multiselect(
-                "Receitas a desconsiderar (não são vendas)",
-                planos_rec, 
-                default=sugeridos
-            )
-            df_receitas_fora = df_receitas[df_receitas['Plano de Contas'].isin(excluir)]
-            df_receitas = df_receitas[~df_receitas['Plano de Contas'].isin(excluir)]
+        # ISOLAR TRANSFERÊNCIAS / MÚTUOS DA RECEITA OPERACIONAL DE VENDAS
+        df_rec_vendas = df_receitas[df_receitas['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"].copy() if not df_receitas.empty else pd.DataFrame()
+        df_rec_mutuo = df_receitas[df_receitas['Categoria_CFO'] == "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"].copy() if not df_receitas.empty else pd.DataFrame()
 
         df_desp_operacional = df_despesas[df_despesas['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"].copy() if not df_despesas.empty else pd.DataFrame()
         df_desp_mutuo = df_despesas[df_despesas['Categoria_CFO'] == "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"].copy() if not df_despesas.empty else pd.DataFrame()
 
-        # TOTALIZADORES
-        tot_receita_prevista = df_receitas['Valor'].sum() if not df_receitas.empty else (df_lojas_concat['Entradas'].sum() if not df_lojas_concat.empty else 0.0)
-        tot_receita_realizada = df_receitas[df_receitas['Status_Clean'] == 'REALIZADO']['Valor'].sum() if not df_receitas.empty else tot_receita_prevista
+        # TOTALIZADORES APENAS DE VENDAS PURAS
+        tot_receita_prevista = df_rec_vendas['Valor'].sum() if not df_rec_vendas.empty else (df_lojas_concat['Entradas'].sum() if not df_lojas_concat.empty else 0.0)
+        tot_receita_realizada = df_rec_vendas[df_rec_vendas['Status_Clean'] == 'REALIZADO']['Valor'].sum() if not df_rec_vendas.empty else tot_receita_prevista
         
         tot_previsto = df_desp_operacional['Valor'].sum() if not df_desp_operacional.empty else 0.0
         tot_realizado = df_desp_operacional[df_desp_operacional['Status_Clean'] == 'REALIZADO']['Valor'].sum() if not df_desp_operacional.empty else 0.0
         tot_pendente = df_desp_operacional[df_desp_operacional['Status_Clean'] == 'PENDENTE']['Valor'].sum() if not df_desp_operacional.empty else 0.0
-        tot_mutuo_realizado = df_desp_mutuo[df_desp_mutuo['Status_Clean'] == 'REALIZADO']['Valor'].sum() if not df_desp_mutuo.empty else 0.0
+        
+        tot_mutuo_rec_realizado = df_rec_mutuo[df_rec_mutuo['Status_Clean'] == 'REALIZADO']['Valor'].sum() if not df_rec_mutuo.empty else 0.0
+        tot_mutuo_desp_realizado = df_desp_mutuo[df_desp_mutuo['Status_Clean'] == 'REALIZADO']['Valor'].sum() if not df_desp_mutuo.empty else 0.0
 
         st.caption("👇 **Clique nos botões para filtrar as despesas na tabela inferior:**")
 
@@ -488,10 +490,11 @@ if df_tudo is not None and not df_tudo.empty:
                 "% do Total": f"{(res_operacional_real / tot_receita_realizada * 100) if tot_receita_realizada > 0 else 0:.1f}%"
             })
             
-            p_mutuo = df_desp_mutuo['Valor'].sum() if not df_desp_mutuo.empty else 0.0
-            r_mutuo = tot_mutuo_realizado
+            p_mutuo = (df_desp_mutuo['Valor'].sum() if not df_desp_mutuo.empty else 0.0) - (df_rec_mutuo['Valor'].sum() if not df_rec_mutuo.empty else 0.0)
+            r_mutuo = tot_mutuo_desp_realizado - tot_mutuo_rec_realizado
+            
             dre_list.append({
-                "Categoria CFO": "   (-) 7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO ENTRE LOJAS",
+                "Categoria CFO": "   (+/-) 7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO ENTRE LOJAS",
                 "Previsto (R$)": f"R$ {p_mutuo:,.2f}",
                 "Realizado (R$)": f"R$ {r_mutuo:,.2f}",
                 "Variação (R$)": f"R$ {r_mutuo - p_mutuo:,.2f}",
@@ -530,8 +533,8 @@ if df_tudo is not None and not df_tudo.empty:
                     hide_index=True
                 )
                 
-                if not df_receitas_fora.empty:
-                    st.caption(f"ℹ️ Receitas desconsideradas (não são vendas): **R$ {df_receitas_fora['Valor'].sum():,.2f}**")
+                if not df_rec_mutuo.empty:
+                    st.caption(f"ℹ️ Transferências / Mútuos desconsiderados das vendas: **R$ {df_rec_mutuo['Valor'].sum():,.2f}**")
             
         with tab2:
             st.subheader("Matriz Diária com Saldo de Encerramento (Fluxo de Caixa F360)")
@@ -539,24 +542,28 @@ if df_tudo is not None and not df_tudo.empty:
             df_filtered['Dia'] = pd.to_datetime(df_filtered['Vencimento_dt']).dt.day
             dias_mes = sorted([int(d) for d in df_filtered['Dia'].dropna().unique() if d > 0])
             
-            piv_ent = df_receitas.groupby('Dia')['Valor'].sum() if not df_receitas.empty else pd.Series(0.0, index=dias_mes)
+            piv_ent = df_rec_vendas.groupby('Dia')['Valor'].sum() if not df_rec_vendas.empty else pd.Series(0.0, index=dias_mes)
             piv_sai = df_despesas[df_despesas['Status_Clean'] == 'REALIZADO'].groupby('Dia')['Valor'].sum() if not df_despesas.empty else pd.Series(0.0, index=dias_mes)
-            
-            row_e, row_s, row_liq = {}, {}, {}
-            
+            piv_transf_in = df_rec_mutuo[df_rec_mutuo['Status_Clean'] == 'REALIZADO'].groupby('Dia')['Valor'].sum() if not df_rec_mutuo.empty else pd.Series(dtype=float)
+            piv_transf_out = df_desp_mutuo[df_desp_mutuo['Status_Clean'] == 'REALIZADO'].groupby('Dia')['Valor'].sum() if not df_desp_mutuo.empty else pd.Series(dtype=float)
+
+            row_e, row_s, row_transf, row_liq = {}, {}, {}, {}
+
             for d in dias_mes:
                 e = piv_ent.get(d, 0.0)
                 s = piv_sai.get(d, 0.0)
-                l = e - s
+                t = piv_transf_in.get(d, 0.0) - piv_transf_out.get(d, 0.0)
                 
                 row_e[d] = e
                 row_s[d] = s
-                row_liq[d] = l
-                
+                row_transf[d] = t
+                row_liq[d] = e - s + t
+
             df_extrato_diario = pd.DataFrame([
-                {"Linha de Extrato": "1. (+) Total Receitas Liquidadas", **row_e},
+                {"Linha de Extrato": "1. (+) Total Vendas Liquidadas", **row_e},
                 {"Linha de Extrato": "2. (-) Total Saídas Liquidadas", **row_s},
-                {"Linha de Extrato": "3. (=) Resultado Líquido do Dia", **row_liq}
+                {"Linha de Extrato": "3. (+/-) Transferências entre Empresas", **row_transf},
+                {"Linha de Extrato": "4. (=) Resultado Líquido do Dia (com transferências)", **row_liq}
             ])
             
             cols_order = ["Linha de Extrato"] + dias_mes
