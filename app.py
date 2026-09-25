@@ -64,6 +64,15 @@ MAPA_CNPJ_LOJA = {
     "36240923000320": "8 - GOIABEIRAS"
 }
 
+# SALDOS OFICIAIS DE FECHAMENTO EM 31/08/2026 PARA USO EM 01/09/2026
+SALDOS_INICIAIS_AGOSTO = {
+    "17 Pantanal Itaú": 24053.13,
+    "36 MJL": 500.00,
+    "51 Estação Itaú": 333.38,
+    "52 RT": 3434.92,
+    "61 Itaú Goiabeiras": 300.77
+}
+
 # ---------------------------------------------------------
 # CATEGORIZAÇÃO DE PLANOS DE CONTAS
 # ---------------------------------------------------------
@@ -176,15 +185,6 @@ with st.sidebar:
         else:
             st.error("🔴 Falha na autenticação F360")
             
-    st.divider()
-    st.header("🏦 Saldo Inicial de Caixa")
-    saldo_inicial_input = st.number_input(
-        "Saldo Inicial no dia 1 do período (R$):", 
-        value=0.0, 
-        step=100.0,
-        format="%.2f"
-    )
-
     st.divider()
     st.header("🧾 Detalhes Fluxo de Caixa (F360, fonte oficial)")
     files_detalhes = st.file_uploader(
@@ -397,7 +397,11 @@ if df_tudo is not None and not df_tudo.empty:
 
             row_s_ini, row_vendas, row_tin, row_tot_ent, row_saidas, row_tout, row_tot_sai, row_liq_op, row_saldo_final = {}, {}, {}, {}, {}, {}, {}, {}, {}
 
-            saldo_acumulado = float(saldo_inicial_input)
+            # DETERMINA O SALDO INICIAL FIXADO DE 31/08/2026
+            if conta_selecionada in SALDOS_INICIAIS_AGOSTO:
+                saldo_acumulado = SALDOS_INICIAIS_AGOSTO[conta_selecionada]
+            else:
+                saldo_acumulado = sum(SALDOS_INICIAIS_AGOSTO.values())
 
             for d in dias_mes:
                 s_inicial = saldo_acumulado
@@ -413,7 +417,7 @@ if df_tudo is not None and not df_tudo.empty:
                 liq_op = v - s
                 s_final = s_inicial + tot_e - tot_s
                 
-                saldo_acumulado = s_final  # Transporta o saldo para o dia seguinte
+                saldo_acumulado = s_final  # Transporta para o dia seguinte
                 
                 row_s_ini[d] = s_inicial
                 row_vendas[d] = v
@@ -428,7 +432,7 @@ if df_tudo is not None and not df_tudo.empty:
                 row_saldo_final[d] = s_final
 
             df_extrato_diario = pd.DataFrame([
-                {"Linha de Extrato": "0. 🏦 SALDO INICIAL DO DIA (Transportado)", **row_s_ini},
+                {"Linha de Extrato": "0. 🏦 SALDO INICIAL DO DIA (Transportado de 31/08)", **row_s_ini},
                 {"Linha de Extrato": "1. (+) Total Vendas Liquidadas", **row_vendas},
                 {"Linha de Extrato": "2. (+) Transferências Recebidas (Mútuo / Entradas)", **row_tin},
                 {"Linha de Extrato": "3. (=) TOTAL DE ENTRADAS (Vendas + Transferências)", **row_tot_ent},
