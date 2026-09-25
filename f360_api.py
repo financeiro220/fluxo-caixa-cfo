@@ -431,6 +431,142 @@ def processar_parcelas_cartoes_arquivo(arquivo, mapa_cnpj):
 
 
 # ---------------------------------------------------------------------------
+# Relatório nativo "Detalhes Fluxo de Caixa" (xlsx, 5 abas) exportado do F360.
+# É a fonte da verdade: já separa Títulos, Cartões, Transferências e Ajustes,
+# sem depender de heurística por palavra-chave.
+# ---------------------------------------------------------------------------
+def _nomes_lojas_chave(mapa_cnpj):
+    """Extrai palavras-chave dos nomes das lojas para detectar intercompany
+    pelo campo Pessoa (ex.: '4- PANTANAL' -> 'PANTANAL')."""
+    chaves = set()
+    for nome in mapa_cnpj.values():
+        s = unicodedata.normalize("NFKD", str(nome)).encode("ascii", "ignore").decode()
+        for palavra in re.split(r"[^A-Za-z]+", s.upper()):
+            if len(palavra) >= 4:  # ignora números de loja e conectores curtos
+                chaves.add(palavra)
+    return chaves
+
+
+def _acha_cabecalho(df_raw, tokens):
+    """Procura a linha de cabeçalho que contenha todos os tokens informados."""
+    for idx, row in df_raw.iterrows():
+        vals = [str(v) for v in row.dropna()]
+        texto = " | ".join(vals)
+        if all(tok in texto for tok in tokens):
+            return idx
+    return None
+
+
+def _ler_aba(caminho_ou_buffer, aba, tokens_cabecalho):
+    df_raw = pd.read_excel(caminho_ou_buffer, sheet_name=aba, header=None, dtype=object)
+    cab = _acha_cabecalho(df_raw, tokens_cabecalho)
+    if cab is None:
+        return pd.DataFrame()
+    df = df_raw.iloc[cab + 1:].copy()
+    df.columns = [str(c).strip() for c in df_raw.iloc[cab].values]
+    df = df.dropna(how="all")
+    return df.reset_index(drop=True)
+
+
+def processar_detalhes_fluxo_caixa(arquivos, mapa_cnpj):
+    """
+    Lê um ou mais arquivos 'Detalhes Fluxo de Caixa.xlsx' exportados do F360
+    (o F360 pode dividir a exportação em vários arquivos) e devolve:
+      - df_entradas: título+cartão+transferência+ajuste normalizados, uma linha
+        por lançamento, prontos para exibir ou comparar com a API.
+      - brutos: dict com os DataFrames originais de cada aba (para conferência).
+    """
+    if not isinstance(arquivos, (list, tuple)):
+        arquivos = [arquivos]
+
+    chaves_lojas = _nomes_lojas_chave(mapa_cnpj)
+    linhas, brutos = [], {"titulos": [], "cartoes": [], "transferencias": [], "ajustes": []}
+
+    for arq in arquivos:
+        t = _ler_aba(arq, "Parcelas de Títulos", ["Empresa", "Pessoa", "Valor Bruto"])
+        for _, r in t.iterrows():
+            pessoa = str(r.get("Pessoa") or "").strip()
+            pessoa_norm = unicodedata.normalize("NFKD", pessoa).encode("ascii", "ignore").decode().upper()
+            intercompany = any(k in pessoa_norm for k in chaves_lojas)
+            linhas.append({
+                "Origem": "Título", "Detalhe": pessoa or "Não informado",
+                "Empresa": str(r.get("Empresa") or "").strip(),
+                "Conta": str(r.get("Conta") or "").strip(),
+                "Cliente / Fornecedor": pessoa,
+                "Número": r.get("Número"),
+                "Valor_Bruto": _num(r.get("Valor Bruto")),
+                "Valor": _num(r.get("Valor Líquido")),
+                "Vencimento_real": _data(r.get("Vencimento")),
+                "Liquidacao_dt": _data(r.get("Liquidação/Agendamento")),
+                "Categoria_CFO": ("7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO" if intercompany
+                                 else "0. RECEITAS DE VENDAS"),
+            })
+        brutos["titulos"].append(t)
+
+        c = _ler_aba(arq, "Parcelas de Cartões", ["Empresa", "Adquirente", "Valor Bruto"])
+        for _, r in c.iterrows():
+            adq = str(r.get("Adquirente") or "").strip()
+            band = str(r.get("Bandeira") or "").strip()
+            linhas.append({
+                "Origem": "Cartão", "Detalhe": f"{adq} - {band}" if band else adq,
+                "Empresa": str(r.get("Empresa") or "").strip(),
+                "Conta": str(r.get("Conta") or "").strip(),
+                "Cliente / Fornecedor": f"{adq} ({band})" if band else adq,
+                "Número": r.get("Parcela"),
+                "Valor_Bruto": _num(r.get("Valor Bruto")),
+                "Valor": _num(r.get("Valor Líquido")),
+                "Vencimento_real": _data(r.get("Vencimento")),
+                "Liquidacao_dt": _data(r.get("Liquidação/Agendamento")),
+                "Categoria_CFO": "0. RECEITAS DE VENDAS",
+            })
+        brutos["cartoes"].append(c)
+
+        tr = _ler_aba(arq, "Transferências", ["Conta", "Valor Bruto"])
+        for _, r in tr.iterrows():
+            linhas.append({
+                "Origem": "Transferência", "Detalhe": f"-> {r.get('Conta Relacionada', '')}",
+                "Empresa": "", "Conta": str(r.get("Conta") or "").strip(),
+                "Cliente / Fornecedor": str(r.get("Conta Relacionada") or ""),
+                "Número": None,
+                "Valor_Bruto": _num(r.get("Valor Bruto")),
+                "Valor": _num(r.get("Valor Bruto")),
+                "Vencimento_real": _data(r.get("Emissão")),
+                "Liquidacao_dt": _data(r.get("Emissão")),
+                "Categoria_CFO": "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO",
+            })
+        brutos["transferencias"].append(tr)
+
+        aj = _ler_aba(arq, "Ajustes", ["Conta", "Valor Bruto"])
+        for _, r in aj.iterrows():
+            linhas.append({
+                "Origem": "Ajuste", "Detalhe": "Ajuste manual",
+                "Empresa": "", "Conta": str(r.get("Conta") or "").strip(),
+                "Cliente / Fornecedor": "Ajuste", "Número": None,
+                "Valor_Bruto": _num(r.get("Valor Bruto")),
+                "Valor": _num(r.get("Valor Bruto")),
+                "Vencimento_real": _data(r.get("Emissão")),
+                "Liquidacao_dt": _data(r.get("Emissão")),
+                "Categoria_CFO": "8. AJUSTES DE CAIXA",
+            })
+        brutos["ajustes"].append(aj)
+
+    df = pd.DataFrame(linhas)
+    if not df.empty:
+        df["Vencimento_dt"] = df["Liquidacao_dt"].where(df["Liquidacao_dt"].notna(), df["Vencimento_real"])
+        df = df.dropna(subset=["Vencimento_dt"]).copy()
+        df["Dia"] = df["Vencimento_dt"].dt.day
+        df["Status_Clean"] = "REALIZADO"  # este relatório só traz o que já está lançado/agendado
+        df["Status"] = "Lançado"
+        df["Tipo_Movimento"] = "RECEITA"
+        df["ParcelaId"] = df["Origem"] + "_" + df.index.astype(str)
+
+    for k in brutos:
+        brutos[k] = pd.concat([b for b in brutos[k] if not b.empty], ignore_index=True) if any(not b.empty for b in brutos[k]) else pd.DataFrame()
+
+    return df, brutos
+
+
+# ---------------------------------------------------------------------------
 # Função principal
 # ---------------------------------------------------------------------------
 def buscar_parcelas_f360(jwt, d_ini, d_fim, mapa_cnpj, tipo="Despesa",

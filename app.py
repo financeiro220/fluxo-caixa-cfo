@@ -3,13 +3,16 @@ import pandas as pd
 import numpy as np
 import json
 import re
+import unicodedata
 from datetime import datetime, date, timedelta
 
-# IMPORTAÇÃO DO MÓDULO F360 ATUALIZADO
+# IMPORTAÇÃO DO MÓDULO F360
 from f360_api import (
     autenticar_f360, 
     buscar_parcelas_f360, 
-    processar_parcelas_cartoes_arquivo
+    processar_parcelas_cartoes_arquivo,
+    processar_detalhes_fluxo_caixa,
+    _nomes_lojas_chave
 )
 
 # ---------------------------------------------------------
@@ -85,12 +88,11 @@ def categorizar_plano_contas(plano):
     else:
         return "5. DESPESAS OPERACIONAIS & VENDAS"
 
-def categorizar_receita(plano):
-    """Separa vendas operacionais puras de transferências e mútuos entre contas."""
-    if pd.isna(plano):
-        return "0. RECEITAS DE VENDAS"
-    p = str(plano).upper().strip()
-    if any(k in p for k in ['MÚTUO', 'MUTUO', 'TRANSFER', 'EMPRÉSTIMO', 'EMPRESTIMO', 'APORTE']):
+def categorizar_receita(row, chaves_lojas):
+    """Verifica se a Pessoa (Cliente/Fornecedor) é outra loja da rede."""
+    pessoa = str(row.get("Cliente / Fornecedor") or "")
+    pessoa_norm = unicodedata.normalize("NFKD", pessoa).encode("ascii", "ignore").decode().upper()
+    if any(k in pessoa_norm for k in chaves_lojas):
         return "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"
     return "0. RECEITAS DE VENDAS"
 
@@ -103,7 +105,8 @@ def carregar_despesas_api_f360(jwt_token, d_ini, d_fim, log=None):
 def carregar_receitas_f360(jwt_token, d_ini, d_fim, log=None):
     df_rec = buscar_parcelas_f360(jwt_token, d_ini, d_fim, MAPA_CNPJ_LOJA, tipo="Receita", log=log)
     if df_rec is not None and not df_rec.empty:
-        df_rec["Categoria_CFO"] = df_rec["Plano de Contas"].apply(categorizar_receita)
+        chaves = _nomes_lojas_chave(MAPA_CNPJ_LOJA)
+        df_rec["Categoria_CFO"] = df_rec.apply(lambda r: categorizar_receita(r, chaves), axis=1)
         df_rec["Tipo_Movimento"] = "RECEITA"
     return df_rec
 
@@ -111,9 +114,14 @@ def carregar_receitas_f360(jwt_token, d_ini, d_fim, log=None):
 def carregar_cartoes_arquivo(file):
     df = processar_parcelas_cartoes_arquivo(file, MAPA_CNPJ_LOJA)
     if not df.empty:
-        df["Categoria_CFO"] = df["Plano de Contas"].apply(categorizar_receita)
+        chaves = _nomes_lojas_chave(MAPA_CNPJ_LOJA)
+        df["Categoria_CFO"] = df.apply(lambda r: categorizar_receita(r, chaves), axis=1)
         df["Tipo_Movimento"] = "RECEITA"
     return df
+
+@st.cache_data(ttl=3600)
+def carregar_detalhes_fluxo_caixa(_arquivos, nomes):
+    return processar_detalhes_fluxo_caixa(_arquivos, MAPA_CNPJ_LOJA)
 
 # ---------------------------------------------------------
 # PROCESSAMENTO DE ARQUIVOS OFFLINE
@@ -283,6 +291,13 @@ with st.sidebar:
             st.error("🔴 Falha na autenticação F360")
             
     st.divider()
+    st.header("🧾 Detalhes Fluxo de Caixa (F360, fonte oficial)")
+    files_detalhes = st.file_uploader(
+        "Exporte em F360 > Fluxo de Caixa > Detalhes (pode anexar vários arquivos)",
+        type=["xlsx"], accept_multiple_files=True, key="detalhes"
+    )
+
+    st.divider()
     st.header("📥 Relatórios ERP / F360 (Offline)")
     json_f360_file = st.file_uploader("Anexe o Ficheiro JSON F360 (.json)", type=["json"])
     uploaded_file = st.file_uploader("OU Anexe o Rateio de Despesas em Excel (.xlsx)", type=["xlsx", "xls"])
@@ -318,24 +333,36 @@ else:
     df_despesas_fonte = st.session_state.get("df_api_desp")
 
 frames_rec = []
-rec_api = st.session_state.get("df_api_rec")
-if rec_api is not None and not rec_api.empty:
-    frames_rec.append(rec_api)
 
-tem_cartao_api = (
-    rec_api is not None 
-    and not rec_api.empty 
-    and "Origem" in rec_api.columns 
-    and (rec_api["Origem"] == "Cartão").any()
-)
-
-if file_cartoes is not None and not tem_cartao_api:
+if files_detalhes:
     try:
-        df_c_file = carregar_cartoes_arquivo(file_cartoes)
-        frames_rec.append(df_c_file)
-        st.sidebar.success(f"🟢 Cartões File: {len(df_c_file)} receitas")
+        df_detalhes_rec, _ = carregar_detalhes_fluxo_caixa(
+            files_detalhes, tuple(f.name for f in files_detalhes)
+        )
+        frames_rec.append(df_detalhes_rec)
+        st.sidebar.success(f"🟢 Detalhes Fluxo de Caixa: {len(df_detalhes_rec)} lançamentos (fonte oficial)")
     except Exception as e:
-        st.sidebar.error(f"Erro ao ler arquivo de cartões: {e}")
+        st.sidebar.error(f"Erro ao ler Detalhes Fluxo de Caixa: {e}")
+
+if not frames_rec:
+    rec_api = st.session_state.get("df_api_rec")
+    if rec_api is not None and not rec_api.empty:
+        frames_rec.append(rec_api)
+
+    tem_cartao_api = (
+        rec_api is not None 
+        and not rec_api.empty 
+        and "Origem" in rec_api.columns 
+        and (rec_api["Origem"] == "Cartão").any()
+    )
+
+    if file_cartoes is not None and not tem_cartao_api:
+        try:
+            df_c_file = carregar_cartoes_arquivo(file_cartoes)
+            frames_rec.append(df_c_file)
+            st.sidebar.success(f"🟢 Cartões File: {len(df_c_file)} receitas")
+        except Exception as e:
+            st.sidebar.error(f"Erro ao ler arquivo de cartões: {e}")
 
 df_receitas_fonte = pd.concat(frames_rec, ignore_index=True) if frames_rec else None
 
@@ -440,6 +467,19 @@ if df_tudo is not None and not df_tudo.empty:
 
         with k4:
             st.metric("Total Receita Líquida (Vendas)", f"R$ {tot_receita_prevista:,.2f}", delta=f"Realizado: R$ {tot_receita_realizada:,.2f}")
+
+        if st.button("👁️ Ver Lançamentos de Receita (detalhado)", use_container_width=True):
+            st.session_state.ver_lancamentos_receita = not st.session_state.get("ver_lancamentos_receita", False)
+
+        if st.session_state.get("ver_lancamentos_receita") and not df_receitas.empty:
+            st.subheader(f"Lançamentos de receita no período/loja filtrado ({len(df_receitas)})")
+            cols_disp = [c for c in ["Vencimento_dt", "Empresa", "Conta", "Origem", "Detalhe",
+                                     "Cliente / Fornecedor", "Valor_Bruto", "Valor",
+                                     "Categoria_CFO", "Status_Clean"] if c in df_receitas.columns]
+            df_ver = df_receitas[cols_disp].copy()
+            if "Vencimento_dt" in df_ver.columns:
+                df_ver["Vencimento_dt"] = pd.to_datetime(df_ver["Vencimento_dt"]).dt.strftime('%d/%m/%Y')
+            st.dataframe(df_ver.sort_values("Empresa"), use_container_width=True, hide_index=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -612,8 +652,8 @@ else:
         <h3>🍦 Painel de Fluxo de Caixa Executivo - Gelateria Borelli</h3>
         <p>Aguardando carga dos relatórios no menu lateral para inicializar o processamento.</p>
         <ol>
-            <li>Ative a opção <b>Usar API F360 (Tempo Real)</b> e clique em <b>🚀 Buscar Despesas / Parcelas</b> e <b>📈 Buscar Receitas / Cartões</b>.</li>
-            <li>OU anexe o arquivo de <b>Parcelas de Cartões (export F360)</b> no menu lateral.</li>
+            <li>Anexe o relatório <b>Detalhes Fluxo de Caixa (.xlsx)</b> do F360 na barra lateral para leitura nativa sem heurísticas.</li>
+            <li>OU ative a opção <b>Usar API F360 (Tempo Real)</b> e clique nos botões de busca.</li>
         </ol>
     </div>
     """, unsafe_allow_html=True)
