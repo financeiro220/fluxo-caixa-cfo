@@ -193,7 +193,6 @@ if 'filtro_kpi' not in st.session_state:
 df_despesas_fonte = st.session_state.get("df_api_desp")
 frames_rec = []
 
-# 1. Se anexou o relatório nativo Detalhes
 if files_detalhes:
     try:
         df_detalhes_rec, _ = carregar_detalhes_fluxo_caixa(files_detalhes, tuple(f.name for f in files_detalhes))
@@ -202,12 +201,10 @@ if files_detalhes:
     except Exception as e:
         st.sidebar.error(f"Erro ao ler Detalhes Fluxo de Caixa: {e}")
 
-# 2. Receitas vindas da API (Títulos + Cartões)
 rec_api = st.session_state.get("df_api_rec")
 if rec_api is not None and not rec_api.empty:
     frames_rec.append(rec_api)
 
-# 3. Cartões Offline (se anexados)
 if file_cartoes is not None:
     try:
         df_c_file = carregar_cartoes_arquivo(file_cartoes)
@@ -389,31 +386,40 @@ if df_tudo is not None and not df_tudo.empty:
             # 4. Transferências de Saída (Empréstimo Mútuo)
             piv_transf_out = df_desp_mutuo[df_desp_mutuo['Status_Clean'] == 'REALIZADO'].groupby('Dia')['Valor'].sum() if not df_desp_mutuo.empty else pd.Series(0.0, index=dias_mes)
 
-            row_vendas, row_tin, row_saidas, row_tout, row_liq_op, row_liq_final = {}, {}, {}, {}, {}, {}
+            row_vendas, row_tin, row_tot_ent, row_saidas, row_tout, row_tot_sai, row_liq_op, row_liq_final = {}, {}, {}, {}, {}, {}, {}, {}
 
             for d in dias_mes:
                 v = piv_ent_vendas.get(d, 0.0)
                 tin = piv_transf_in.get(d, 0.0)
+                tot_e = v + tin
+                
                 s = piv_sai_op.get(d, 0.0)
                 tout = piv_transf_out.get(d, 0.0)
+                tot_s = s + tout
                 
                 liq_op = v - s
-                liq_final = (v + tin) - (s + tout)
+                liq_final = tot_e - tot_s
                 
                 row_vendas[d] = v
                 row_tin[d] = tin
+                row_tot_ent[d] = tot_e
+                
                 row_saidas[d] = s
                 row_tout[d] = tout
+                row_tot_sai[d] = tot_s
+                
                 row_liq_op[d] = liq_op
                 row_liq_final[d] = liq_final
 
             df_extrato_diario = pd.DataFrame([
                 {"Linha de Extrato": "1. (+) Total Vendas Liquidadas", **row_vendas},
                 {"Linha de Extrato": "2. (+) Transferências Recebidas (Mútuo / Entradas)", **row_tin},
-                {"Linha de Extrato": "3. (-) Total Saídas / Despesas Liquidadas", **row_saidas},
-                {"Linha de Extrato": "4. (-) Transferências Concedidas (Empréstimo Mútuo / Saídas)", **row_tout},
-                {"Linha de Extrato": "5. (=) Resultado Líquido Operacional (Vendas - Saídas)", **row_liq_op},
-                {"Linha de Extrato": "6. (=) Resultado Líquido Final de Caixa (Com Transferências)", **row_liq_final}
+                {"Linha de Extrato": "3. (=) TOTAL DE ENTRADAS (Vendas + Transferências)", **row_tot_ent},
+                {"Linha de Extrato": "4. (-) Total Saídas / Despesas Liquidadas", **row_saidas},
+                {"Linha de Extrato": "5. (-) Transferências Concedidas (Empréstimo Mútuo / Saídas)", **row_tout},
+                {"Linha de Extrato": "6. (=) TOTAL DE SAÍDAS (Despesas + Transferências)", **row_tot_sai},
+                {"Linha de Extrato": "7. (=) Resultado Líquido Operacional (Vendas - Saídas)", **row_liq_op},
+                {"Linha de Extrato": "8. (=) Resultado Líquido Final de Caixa (Entradas - Saídas)", **row_liq_final}
             ])
             
             cols_order = ["Linha de Extrato"] + dias_mes
