@@ -10,16 +10,15 @@ from datetime import datetime, date, timedelta
 from f360_api import (
     autenticar_f360, 
     buscar_parcelas_f360, 
-    processar_parcelas_cartoes_arquivo,
     processar_detalhes_fluxo_caixa,
-    _nomes_lojas_chave
+    IDS_CONTAS_BORELLI
 )
 
 # ---------------------------------------------------------
 # CONFIGURAÇÃO DA PÁGINA E TEMA BORELLI
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="Gelateria Borelli - Gestão de Fluxo de Caixa",
+    page_title="Gelateria Borelli - Gestão de Fluxo de Caixa por Conta Bancária",
     page_icon="🟢",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -64,9 +63,6 @@ MAPA_CNPJ_LOJA = {
     "36240923000320": "8 - GOIABEIRAS"
 }
 
-# ---------------------------------------------------------
-# CATEGORIZAÇÃO DE PLANOS DE CONTAS
-# ---------------------------------------------------------
 def categorizar_plano_contas(plano):
     if pd.isna(plano):
         return "5. DESPESAS OPERACIONAIS & VENDAS"
@@ -86,11 +82,9 @@ def categorizar_plano_contas(plano):
     else:
         return "5. DESPESAS OPERACIONAIS & VENDAS"
 
-def categorizar_receita(row, chaves_lojas):
+def categorizar_receita(row):
     plano = str(row.get("Plano de Contas") or "").upper().strip()
-    pessoa = str(row.get("Cliente / Fornecedor") or "").strip()
-    pessoa_norm = unicodedata.normalize("NFKD", pessoa).encode("ascii", "ignore").decode().upper()
-    if any(k in plano for k in ['MÚTUO', 'MUTUO', 'EMPRÉSTIMO MÚTUO', 'EMPRESTIMO MUTUO', 'TRANSFERÊNCIA']) or any(k in pessoa_norm for k in chaves_lojas):
+    if any(k in plano for k in ['EMPRÉSTIMO MÚTUO', 'EMPRESTIMO MUTUO', 'MÚTUO', 'MUTUO', 'TRANSFERÊNCIA INTERCOMPANY']):
         return "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"
     return "0. RECEITAS DE VENDAS"
 
@@ -103,144 +97,19 @@ def carregar_despesas_api_f360(jwt_token, d_ini, d_fim, log=None):
 def carregar_receitas_f360(jwt_token, d_ini, d_fim, log=None):
     df_rec = buscar_parcelas_f360(jwt_token, d_ini, d_fim, MAPA_CNPJ_LOJA, tipo="Receita", log=log)
     if df_rec is not None and not df_rec.empty:
-        chaves = _nomes_lojas_chave(MAPA_CNPJ_LOJA)
-        df_rec["Categoria_CFO"] = df_rec.apply(lambda r: categorizar_receita(r, chaves), axis=1)
+        df_rec["Categoria_CFO"] = df_rec.apply(categorizar_receita, axis=1)
         df_rec["Tipo_Movimento"] = "RECEITA"
     return df_rec
-
-@st.cache_data(ttl=3600)
-def carregar_cartoes_arquivo(file):
-    df = processar_parcelas_cartoes_arquivo(file, MAPA_CNPJ_LOJA)
-    if not df.empty:
-        chaves = _nomes_lojas_chave(MAPA_CNPJ_LOJA)
-        df["Categoria_CFO"] = df.apply(lambda r: categorizar_receita(r, chaves), axis=1)
-        df["Tipo_Movimento"] = "RECEITA"
-    return df
 
 @st.cache_data(ttl=3600)
 def carregar_detalhes_fluxo_caixa(_arquivos, nomes):
     return processar_detalhes_fluxo_caixa(_arquivos, MAPA_CNPJ_LOJA)
 
 # ---------------------------------------------------------
-# PROCESSAMENTO DE ARQUIVOS OFFLINE
-# ---------------------------------------------------------
-def processar_json_f360(data_json):
-    df = pd.DataFrame(data_json)
-    df['Valor'] = pd.to_numeric(df['ValorLcto'], errors='coerce').fillna(0)
-    df['Valor_Bruto'] = df['Valor']
-    df['Plano de Contas'] = df['NomePlanoDeContas'].fillna('Outros')
-    df['Status_Clean'] = df['StatusTitulo'].astype(str).apply(
-        lambda x: "REALIZADO" if any(s in str(x).lower() for s in ['liquidado', 'conciliado']) else "PENDENTE"
-    )
-    
-    def extrair_vencimento(row):
-        if row['Status_Clean'] == 'REALIZADO' and pd.notna(row.get('Liquidacao')):
-            dt_l = pd.to_datetime(row['Liquidacao'], errors='coerce')
-            if pd.notna(dt_l):
-                return dt_l.tz_localize(None) if dt_l.tz is not None else dt_l
-        dt_lcto = pd.to_datetime(row.get('DataDoLcto'), format='%d/%m/%Y', errors='coerce')
-        if pd.notna(dt_lcto):
-            return dt_lcto
-        return pd.to_datetime(row.get('DataCompetencia'), format='%d/%m/%Y', errors='coerce')
-
-    df['Vencimento_dt'] = df.apply(extrair_vencimento, axis=1)
-    df['Vencimento_real'] = pd.to_datetime(df.get('DataDoLcto'), format='%d/%m/%Y', errors='coerce')
-    
-    df = df.dropna(subset=['Vencimento_dt']).copy()
-    df['Vencimento_dt'] = pd.to_datetime(df['Vencimento_dt'])
-    df['Dia'] = df['Vencimento_dt'].dt.day
-    
-    cnpj_limpo = df['CNPJEmpresa'].astype(str).apply(lambda x: re.sub(r'\D', '', x))
-    df['Empresa'] = cnpj_limpo.map(MAPA_CNPJ_LOJA).fillna(df['CNPJEmpresa'])
-    df['Categoria_CFO'] = df['Plano de Contas'].apply(categorizar_plano_contas)
-    df['Cliente / Fornecedor'] = df['ComplemHistorico'].astype(str).apply(lambda x: x.split('-')[0].strip() if '-' in x else x[:30])
-    df['Número'] = df['NumeroTitulo'].fillna('')
-    df['Tipo_Movimento'] = 'DESPESA'
-    df['Origem'] = 'Título'
-    df['Detalhe'] = 'JSON ERP'
-    
-    df = df[~df['StatusTitulo'].astype(str).str.lower().str.contains('cancelado|baixado', na=False)].copy()
-    return df
-
-@st.cache_data(ttl=3600)
-def processar_arquivo_despesas(file):
-    df_raw = pd.read_excel(file)
-    header_idx = None
-    for idx, row in df_raw.iterrows():
-        row_str = " ".join(row.dropna().astype(str))
-        if "Tipo" in row_str and "Vencimento" in row_str and "Valor Bruto" in row_str:
-            header_idx = idx
-            break
-            
-    if header_idx is not None:
-        df = df_raw.iloc[header_idx + 1:].copy()
-        df.columns = df_raw.iloc[header_idx].values
-    else:
-        df = df_raw.copy()
-        
-    df = df[df['Tipo'].astype(str).str.contains('A Pagar|Pagar', case=False, na=False)].copy()
-    status_invalidos = ['cancelado', 'baixado']
-    df = df[~df['Status'].astype(str).str.lower().apply(lambda x: any(s in x for s in status_invalidos))].copy()
-    
-    df['Valor'] = pd.to_numeric(df['Valor Bruto'], errors='coerce').fillna(0)
-    df['Valor_Bruto'] = df['Valor']
-    df['Vencimento_dt'] = pd.to_datetime(df['Vencimento'], errors='coerce')
-    df['Vencimento_real'] = df['Vencimento_dt']
-    df = df.dropna(subset=['Vencimento_dt']).copy()
-    df['Vencimento_dt'] = pd.to_datetime(df['Vencimento_dt'])
-    df['Dia'] = df['Vencimento_dt'].dt.day
-    df['Categoria_CFO'] = df['Plano de Contas'].apply(categorizar_plano_contas)
-    df['Tipo_Movimento'] = 'DESPESA'
-    df['Origem'] = 'Título'
-    df['Detalhe'] = 'Rateio Excel'
-    
-    df['Status_Clean'] = df['Status'].astype(str).apply(
-        lambda x: "REALIZADO" if any(s in str(x) for s in ['Liquidado', 'Conciliado']) else "PENDENTE"
-    )
-    return df
-
-@st.cache_data(ttl=3600)
-def processar_fluxo_caixa_loja(file, nome_loja):
-    xls = pd.ExcelFile(file)
-    sheet_name = 'Fluxo de Caixa' if 'Fluxo de Caixa' in xls.sheet_names else xls.sheet_names[0]
-    df_raw = pd.read_excel(file, sheet_name=sheet_name)
-    
-    header_row = None
-    for idx, row in df_raw.iterrows():
-        row_str = " ".join(row.dropna().astype(str))
-        if "Data" in row_str and "Total" in row_str:
-            header_row = idx
-            break
-            
-    if header_row is not None:
-        df = df_raw.iloc[header_row + 1:].copy()
-        df.columns = df_raw.iloc[header_row].values
-    else:
-        df = df_raw.copy()
-        
-    df.columns = [str(c).strip() for c in df.columns]
-    df['Vencimento_dt'] = pd.to_datetime(df['Data'], errors='coerce')
-    df = df.dropna(subset=['Vencimento_dt']).copy()
-    df['Vencimento_dt'] = pd.to_datetime(df['Vencimento_dt'])
-    df['Dia'] = df['Vencimento_dt'].dt.day
-    
-    cols_total = [i for i, col in enumerate(df.columns) if col == 'Total']
-    if len(cols_total) >= 2:
-        df['Entradas'] = pd.to_numeric(df.iloc[:, cols_total[0]], errors='coerce').fillna(0)
-        df['Saídas'] = pd.to_numeric(df.iloc[:, cols_total[1]], errors='coerce').fillna(0)
-    else:
-        df['Entradas'] = 0.0
-        df['Saídas'] = 0.0
-
-    df['Saldo_Banco'] = pd.to_numeric(df['Saldo'], errors='coerce').fillna(0)
-    df['Empresa'] = nome_loja
-    return df
-
-# ---------------------------------------------------------
 # INTERFACE SIDEBAR
 # ---------------------------------------------------------
-st.markdown("<div class='main-title'>🍦 Gelateria Borelli - Gestão de Fluxo de Caixa</div>", unsafe_allow_html=True)
-st.markdown("<div class='main-subtitle'>Acompanhamento de liquidez, governança e extrato acumulado diário em tempo real (F360 API)</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-title'>🍦 Gelateria Borelli - Gestão de Fluxo de Caixa (Visão Contas Bancárias)</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-subtitle'>Extrato Diário por Contas Bancárias (17 Pantanal Itaú, 51 Estação Itaú e 61 Itaú Goiabeiras)</div>", unsafe_allow_html=True)
 
 with st.sidebar:
     st.header("⚡ Integração F360 API")
@@ -252,7 +121,7 @@ with st.sidebar:
             
         if st.session_state.jwt:
             st.success("🟢 Sessão JWT válida")
-            hoje = date(2026, 9, 1) # Período base
+            hoje = date(2026, 9, 1)
             periodo_api = st.date_input(
                 "Período de Busca", 
                 (hoje.replace(day=1), hoje + timedelta(days=30)), 
@@ -264,7 +133,6 @@ with st.sidebar:
             btn_receitas = st.button("📈 Buscar Receitas / Cartões (API)", use_container_width=True)
             
             log = []
-            
             if btn_despesas and len(periodo_api) == 2:
                 try:
                     with st.spinner("Consultando parcelas de despesas..."):
@@ -291,78 +159,31 @@ with st.sidebar:
     st.divider()
     st.header("🧾 Detalhes Fluxo de Caixa (F360, fonte oficial)")
     files_detalhes = st.file_uploader(
-        "Exporte em F360 > Fluxo de Caixa > Detalhes (pode anexar vários arquivos)",
+        "Exporte em F360 > Fluxo de Caixa > Detalhes (Anexe os arquivos)",
         type=["xlsx"], accept_multiple_files=True, key="detalhes"
     )
-
-    st.divider()
-    st.header("📥 Relatórios ERP / F360 (Offline)")
-    json_f360_file = st.file_uploader("Anexe o Ficheiro JSON F360 (.json)", type=["json"])
-    uploaded_file = st.file_uploader("OU Anexe o Rateio de Despesas em Excel (.xlsx)", type=["xlsx", "xls"])
-    file_cartoes = st.file_uploader("Parcelas de Cartões (export F360)", type=["xlsx", "xls", "csv"], key="c")
-    
-    st.divider()
-    st.header("🍦 Fluxo de Caixa Por Loja")
-    file_pantanal = st.file_uploader("Fluxo Pantanal (.xlsx)", type=["xlsx", "xls"], key="p")
-    file_goiabeiras = st.file_uploader("Fluxo Goiabeiras (.xlsx)", type=["xlsx", "xls"], key="g")
-    file_estacao = st.file_uploader("Fluxo Estação (.xlsx)", type=["xlsx", "xls"], key="e")
 
 if 'filtro_kpi' not in st.session_state:
     st.session_state.filtro_kpi = "PENDENTE"
 
 # ---------------------------------------------------------
-# UNIFICAÇÃO DA FONTE DE DADOS (DESPESAS + RECEITAS)
+# CARGA E PROCESSAMENTO DA FONTE DE DADOS
 # ---------------------------------------------------------
-df_despesas_fonte = None
-if json_f360_file is not None:
-    try:
-        data_j = json.load(json_f360_file)
-        df_despesas_fonte = processar_json_f360(data_j)
-        st.sidebar.success(f"🟢 JSON F360: {len(df_despesas_fonte)} despesas")
-    except Exception as e:
-        st.sidebar.error(f"Erro ao ler JSON: {e}")
-elif uploaded_file is not None:
-    try:
-        df_despesas_fonte = processar_arquivo_despesas(uploaded_file)
-        st.sidebar.success(f"🟢 Rateio Excel: {len(df_despesas_fonte)} despesas")
-    except Exception as e:
-        st.sidebar.error(f"Erro ao ler Excel: {e}")
-else:
-    df_despesas_fonte = st.session_state.get("df_api_desp")
-
-frames_rec = []
+df_despesas_fonte = st.session_state.get("df_api_desp")
+df_receitas_fonte = None
 
 if files_detalhes:
     try:
         df_detalhes_rec, _ = carregar_detalhes_fluxo_caixa(
             files_detalhes, tuple(f.name for f in files_detalhes)
         )
-        frames_rec.append(df_detalhes_rec)
+        df_receitas_fonte = df_detalhes_rec
         st.sidebar.success(f"🟢 Detalhes Fluxo de Caixa: {len(df_detalhes_rec)} lançamentos (fonte oficial)")
     except Exception as e:
         st.sidebar.error(f"Erro ao ler Detalhes Fluxo de Caixa: {e}")
 
-if not frames_rec:
-    rec_api = st.session_state.get("df_api_rec")
-    if rec_api is not None and not rec_api.empty:
-        frames_rec.append(rec_api)
-
-    tem_cartao_api = (
-        rec_api is not None 
-        and not rec_api.empty 
-        and "Origem" in rec_api.columns 
-        and (rec_api["Origem"] == "Cartão").any()
-    )
-
-    if file_cartoes is not None and not tem_cartao_api:
-        try:
-            df_c_file = carregar_cartoes_arquivo(file_cartoes)
-            frames_rec.append(df_c_file)
-            st.sidebar.success(f"🟢 Cartões File: {len(df_c_file)} receitas")
-        except Exception as e:
-            st.sidebar.error(f"Erro ao ler arquivo de cartões: {e}")
-
-df_receitas_fonte = pd.concat(frames_rec, ignore_index=True) if frames_rec else None
+if df_receitas_fonte is None:
+    df_receitas_fonte = st.session_state.get("df_api_rec")
 
 df_tudo_list = []
 if df_despesas_fonte is not None and not df_despesas_fonte.empty:
@@ -380,29 +201,19 @@ if df_tudo is not None and not df_tudo.empty:
         if 'Tipo_Movimento' not in df_tudo.columns:
             df_tudo['Tipo_Movimento'] = 'DESPESA'
 
-        dfs_lojas = []
-        if file_pantanal is not None:
-            dfs_lojas.append(processar_fluxo_caixa_loja(file_pantanal, "4- PANTANAL"))
-        if file_goiabeiras is not None:
-            dfs_lojas.append(processar_fluxo_caixa_loja(file_goiabeiras, "8 - GOIABEIRAS"))
-        if file_estacao is not None:
-            dfs_lojas.append(processar_fluxo_caixa_loja(file_estacao, "5- ESTAÇÃO"))
-            
-        df_lojas_concat = pd.concat(dfs_lojas, ignore_index=True) if len(dfs_lojas) > 0 else pd.DataFrame()
-
         col_filtro1, col_filtro2 = st.columns([2, 1])
         
         min_date = df_tudo['Vencimento_dt'].min().date()
         max_date = df_tudo['Vencimento_dt'].max().date()
         
         with col_filtro1:
-            st.caption("🏢 **Unidade / Loja:**")
-            lojas_disponiveis = list(df_tudo['Empresa'].dropna().unique())
-            lojas_opcoes = ["Ver Todas as Lojas"] + lojas_disponiveis
-            loja_selecionada = st.radio("", lojas_opcoes, horizontal=True)
+            st.caption("🏦 **Pesquisar por Conta Bancária (17, 51 e 61):**")
+            contas_disponiveis = ["17 Pantanal Itaú", "51 Estação Itaú", "61 Itaú Goiabeiras"]
+            contas_opcoes = ["Ver Todas as Contas"] + contas_disponiveis
+            conta_selecionada = st.radio("", contas_opcoes, horizontal=True)
 
         with col_filtro2:
-            st.caption("📅 **Período de Caixa (Liquidação / Vencimento):**")
+            st.caption("📅 **Período de Caixa:**")
             date_range = st.date_input(
                 "",
                 value=(min_date, max_date),
@@ -413,8 +224,8 @@ if df_tudo is not None and not df_tudo.empty:
 
         df_filtered = df_tudo.copy()
         
-        if loja_selecionada != "Ver Todas as Lojas":
-            df_filtered = df_filtered[df_filtered['Empresa'] == loja_selecionada].copy()
+        if conta_selecionada != "Ver Todas as Contas":
+            df_filtered = df_filtered[df_filtered['Empresa'] == conta_selecionada].copy()
 
         if isinstance(date_range, tuple) and len(date_range) == 2:
             start_date, end_date = date_range
@@ -429,23 +240,20 @@ if df_tudo is not None and not df_tudo.empty:
         df_receitas = df_filtered[df_filtered['Tipo_Movimento'] == 'RECEITA'].copy()
         df_despesas = df_filtered[df_filtered['Tipo_Movimento'] == 'DESPESA'].copy()
 
-        # ISOLAR TRANSFERÊNCIAS / MÚTUOS DA RECEITA OPERACIONAL DE VENDAS
+        # ISOLAR MÚTUO/TRANSFERÊNCIAS DE VENDAS PURAS
         df_rec_vendas = df_receitas[df_receitas['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"].copy() if not df_receitas.empty else pd.DataFrame()
         df_rec_mutuo = df_receitas[df_receitas['Categoria_CFO'] == "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"].copy() if not df_receitas.empty else pd.DataFrame()
 
         df_desp_operacional = df_despesas[df_despesas['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"].copy() if not df_despesas.empty else pd.DataFrame()
         df_desp_mutuo = df_despesas[df_despesas['Categoria_CFO'] == "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"].copy() if not df_despesas.empty else pd.DataFrame()
 
-        # TOTALIZADORES APENAS DE VENDAS PURAS
-        tot_receita_prevista = df_rec_vendas['Valor'].sum() if not df_rec_vendas.empty else (df_lojas_concat['Entradas'].sum() if not df_lojas_concat.empty else 0.0)
+        # TOTALIZADORES
+        tot_receita_prevista = df_rec_vendas['Valor'].sum() if not df_rec_vendas.empty else 0.0
         tot_receita_realizada = df_rec_vendas[df_rec_vendas['Status_Clean'] == 'REALIZADO']['Valor'].sum() if not df_rec_vendas.empty else tot_receita_prevista
         
         tot_previsto = df_desp_operacional['Valor'].sum() if not df_desp_operacional.empty else 0.0
         tot_realizado = df_desp_operacional[df_desp_operacional['Status_Clean'] == 'REALIZADO']['Valor'].sum() if not df_desp_operacional.empty else 0.0
         tot_pendente = df_desp_operacional[df_desp_operacional['Status_Clean'] == 'PENDENTE']['Valor'].sum() if not df_desp_operacional.empty else 0.0
-        
-        tot_mutuo_rec_realizado = df_rec_mutuo[df_rec_mutuo['Status_Clean'] == 'REALIZADO']['Valor'].sum() if not df_rec_mutuo.empty else 0.0
-        tot_mutuo_desp_realizado = df_desp_mutuo[df_desp_mutuo['Status_Clean'] == 'REALIZADO']['Valor'].sum() if not df_desp_mutuo.empty else 0.0
 
         st.caption("👇 **Clique nos botões para filtrar as despesas na tabela inferior:**")
 
@@ -470,7 +278,7 @@ if df_tudo is not None and not df_tudo.empty:
             st.session_state.ver_lancamentos_receita = not st.session_state.get("ver_lancamentos_receita", False)
 
         if st.session_state.get("ver_lancamentos_receita") and not df_receitas.empty:
-            st.subheader(f"Lançamentos de receita no período/loja filtrado ({len(df_receitas)})")
+            st.subheader(f"Lançamentos na conta selecionada ({len(df_receitas)})")
             cols_disp = [c for c in ["Vencimento_dt", "Empresa", "Conta", "Origem", "Detalhe",
                                      "Cliente / Fornecedor", "Valor_Bruto", "Valor",
                                      "Categoria_CFO", "Status_Clean"] if c in df_receitas.columns]
@@ -481,7 +289,7 @@ if df_tudo is not None and not df_tudo.empty:
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        tab1, tab2, tab3 = st.tabs(["📋 DRE de Caixa", "📅 Fluxo Diário (Extrato Banco)", "🏪 Comparativo Por Loja"])
+        tab1, tab2, tab3 = st.tabs(["📋 DRE de Caixa", "📅 Fluxo Diário (Extrato Banco)", "🏪 Comparativo Por Conta"])
         
         with tab1:
             st.subheader("Demonstrativo do Fluxo de Caixa (Previsto vs. Realizado)")
@@ -521,75 +329,31 @@ if df_tudo is not None and not df_tudo.empty:
             res_operacional_real = tot_receita_realizada - tot_realizado
             
             dre_list.append({
-                "Categoria CFO": "(=) RESULTADO LÍQUIDO OPERACIONAL (EBITDA DA LOJA)",
+                "Categoria CFO": "(=) RESULTADO LÍQUIDO OPERACIONAL (EBITDA)",
                 "Previsto (R$)": f"R$ {res_operacional_prev:,.2f}",
                 "Realizado (R$)": f"R$ {res_operacional_real:,.2f}",
                 "Variação (R$)": f"R$ {res_operacional_real - res_operacional_prev:,.2f}",
                 "% do Total": f"{(res_operacional_real / tot_receita_realizada * 100) if tot_receita_realizada > 0 else 0:.1f}%"
             })
             
-            p_mutuo = (df_desp_mutuo['Valor'].sum() if not df_desp_mutuo.empty else 0.0) - (df_rec_mutuo['Valor'].sum() if not df_rec_mutuo.empty else 0.0)
-            r_mutuo = tot_mutuo_desp_realizado - tot_mutuo_rec_realizado
-            
-            dre_list.append({
-                "Categoria CFO": "   (+/-) 7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO ENTRE LOJAS",
-                "Previsto (R$)": f"R$ {p_mutuo:,.2f}",
-                "Realizado (R$)": f"R$ {r_mutuo:,.2f}",
-                "Variação (R$)": f"R$ {r_mutuo - p_mutuo:,.2f}",
-                "% do Total": f"{(p_mutuo / tot_receita_prevista * 100) if tot_receita_prevista > 0 else 0:.1f}%"
-            })
-            
-            res_final_prev = res_operacional_prev - p_mutuo
-            res_final_real = res_operacional_real - r_mutuo
-            dre_list.append({
-                "Categoria CFO": "(=) GERAÇÃO LÍQUIDA FINAL DE CAIXA DA CONTA",
-                "Previsto (R$)": f"R$ {res_final_prev:,.2f}",
-                "Realizado (R$)": f"R$ {res_final_real:,.2f}",
-                "Variação (R$)": f"R$ {res_final_real - res_final_prev:,.2f}",
-                "% do Total": f"{(res_final_real / tot_receita_realizada * 100) if tot_receita_realizada > 0 else 0:.1f}%"
-            })
-            
             st.dataframe(pd.DataFrame(dre_list), use_container_width=True, hide_index=True)
             
-            # TABELA DE CONFERÊNCIA DE RECEITAS POR ORIGEM E PLANO DE CONTAS
-            if not df_receitas.empty and "Origem" in df_receitas.columns:
-                st.markdown("<br>", unsafe_allow_html=True)
-                st.subheader("🔍 Receitas por Origem e Plano de Contas (Conferir com F360)")
-                
-                df_rec_conf = df_receitas.copy()
-                if "Valor_Bruto" not in df_rec_conf.columns:
-                    df_rec_conf["Valor_Bruto"] = df_rec_conf["Valor"]
-                    
-                orig = (df_rec_conf.groupby(["Origem", "Plano de Contas", "Detalhe"])
-                        .agg(Qtd=("Valor", "size"), Bruto=("Valor_Bruto", "sum"), Liquido=("Valor", "sum"))
-                        .reset_index())
-                orig["Taxas"] = orig["Bruto"] - orig["Liquido"]
-                
-                st.dataframe(
-                    orig.style.format({c: "R$ {:,.2f}" for c in ["Bruto", "Liquido", "Taxas"]}),
-                    use_container_width=True, 
-                    hide_index=True
-                )
-                
-                if not df_rec_mutuo.empty:
-                    st.caption(f"ℹ️ Transferências / Mútuos desconsiderados das vendas: **R$ {df_rec_mutuo['Valor'].sum():,.2f}**")
-            
         with tab2:
-            st.subheader("Matriz Diária com Saldo de Encerramento (Fluxo de Caixa F360)")
+            st.subheader("Matriz Diária com Saldo de Encerramento (Visão Extrato Bancário F360)")
             
             df_filtered['Dia'] = pd.to_datetime(df_filtered['Vencimento_dt']).dt.day
             dias_mes = sorted([int(d) for d in df_filtered['Dia'].dropna().unique() if d > 0])
             
-            # Vendas puras (sem mútuo)
+            # 1. Vendas puras
             piv_ent_vendas = df_rec_vendas[df_rec_vendas['Status_Clean'] == 'REALIZADO'].groupby('Dia')['Valor'].sum() if not df_rec_vendas.empty else pd.Series(0.0, index=dias_mes)
             
-            # Transferências de entrada (Mútuo / Intercompany)
+            # 2. Transferências de Entrada (Mútuo)
             piv_transf_in = df_rec_mutuo[df_rec_mutuo['Status_Clean'] == 'REALIZADO'].groupby('Dia')['Valor'].sum() if not df_rec_mutuo.empty else pd.Series(0.0, index=dias_mes)
             
-            # Saídas operacionais (sem mútuo)
+            # 3. Saídas operacionais
             piv_sai_op = df_desp_operacional[df_desp_operacional['Status_Clean'] == 'REALIZADO'].groupby('Dia')['Valor'].sum() if not df_desp_operacional.empty else pd.Series(0.0, index=dias_mes)
             
-            # Transferências de saída (Empréstimo Mútuo / Intercompany)
+            # 4. Transferências de Saída (Empréstimo Mútuo)
             piv_transf_out = df_desp_mutuo[df_desp_mutuo['Status_Clean'] == 'REALIZADO'].groupby('Dia')['Valor'].sum() if not df_desp_mutuo.empty else pd.Series(0.0, index=dias_mes)
 
             row_vendas, row_tin, row_saidas, row_tout, row_liq_op, row_liq_final = {}, {}, {}, {}, {}, {}
@@ -627,12 +391,10 @@ if df_tudo is not None and not df_tudo.empty:
             )
             
         with tab3:
-            st.subheader("Matriz Comparativa entre Lojas")
+            st.subheader("Matriz Comparativa por Conta Bancária")
             if not df_despesas.empty:
                 pivot_store = df_despesas.pivot_table(index='Categoria_CFO', columns='Empresa', values='Valor', aggfunc='sum', fill_value=0)
                 st.dataframe(pivot_store.style.format("R$ {:,.2f}"), use_container_width=True)
-            else:
-                st.info("Nenhuma despesa para exibir a comparação por loja.")
 
         st.divider()
 
@@ -654,8 +416,6 @@ if df_tudo is not None and not df_tudo.empty:
                 use_container_width=True,
                 hide_index=True
             )
-        else:
-            st.info("Nenhum título de despesa para o filtro selecionado.")
 
     except Exception as e:
         st.error(f"Erro ao processar os dados: {e}")
@@ -665,8 +425,7 @@ else:
         <h3>🍦 Painel de Fluxo de Caixa Executivo - Gelateria Borelli</h3>
         <p>Aguardando carga dos relatórios no menu lateral para inicializar o processamento.</p>
         <ol>
-            <li>Anexe o relatório <b>Detalhes Fluxo de Caixa (.xlsx)</b> do F360 na barra lateral para leitura nativa sem heurísticas.</li>
-            <li>OU ative a opção <b>Usar API F360 (Tempo Real)</b> e clique nos botões de busca.</li>
+            <li>Anexe o relatório <b>Detalhes Fluxo de Caixa (.xlsx)</b> exportado do F360 para consulta por Conta Bancária.</li>
         </ol>
     </div>
     """, unsafe_allow_html=True)
