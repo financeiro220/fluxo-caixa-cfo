@@ -1,6 +1,6 @@
 """
-f360_api.py - Integração com a API pública e Leitura do Relatório Nativo F360.
-Correção de parsing de datas de liquidação (DD/MM/YYYY) e normalização de contas bancárias.
+f360_api.py - Integração com a API pública do F360.
+Solução para vendas de Cartões/iFood de meses anteriores que liquidam no mês atual (ex: Venda em Agosto, Liquidação em Setembro).
 """
 import json
 import re
@@ -74,14 +74,12 @@ def _num(v):
         return 0.0
 
 def _data(v):
-    """Trata estritamente datas no formato brasileiro DD/MM/YYYY e ISO, removendo fusos."""
     if v is None or (not isinstance(v, str) and pd.isna(v)):
         return pd.NaT
     if isinstance(v, str):
         s = v.strip()
         if not s:
             return pd.NaT
-        # Prioriza o padrão DD/MM/YYYY
         m = re.search(r"(\d{2})/(\d{2})/(\d{4})", s)
         if m:
             d, m_m, y = m.groups()
@@ -197,7 +195,6 @@ def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
     df["Vencimento_real"] = pd.to_datetime(df["Vencimento_real"], errors="coerce")
     df["Liquidacao_dt"] = pd.to_datetime(df["Liquidacao_dt"], errors="coerce")
 
-    # Data de caixa do extrato: Liquidação se realizada, senão Vencimento
     df["Vencimento_dt"] = df["Liquidacao_dt"].where(
         df["Liquidacao_dt"].notna(),
         df["Vencimento_real"],
@@ -207,7 +204,7 @@ def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
     return df
 
 # ---------------------------------------------------------------------------
-# PARCELAS DE CARTÕES (API - ENDPOINT PLURAL)
+# PARCELAS DE CARTÕES (API + FILE)
 # ---------------------------------------------------------------------------
 _ALIAS = {
     "empresa": ["empresa", "nomeempresa", "cnpjempresa", "cnpj"],
@@ -218,7 +215,7 @@ _ALIAS = {
     "bruto": ["vbruto", "valorbruto"],
     "liquido": ["vliquido", "valorliquido"],
     "conta": ["conta", "contaliquidacao", "contadeliquidacao"],
-    "liquidacao": ["liquid", "liquidacao", "dataliquidacao"],
+    "liquidacao": ["liquid", "liquidacao", "dataliquidacao"], # Adicionado 'liquid' com ponto
     "id": ["id", "parcelaid", "cartaoid"],
     "modalidade": ["modalidade"],
 }
@@ -287,11 +284,10 @@ def _normaliza_cartoes(registros, mapa_cnpj):
     for c in ("Data_Venda", "Vencimento_real", "Liquidacao_dt"):
         df[c] = pd.to_datetime(df[c], errors="coerce")
 
-    # Todo cartão com data de liquidação preenchida é REALIZADO no extrato
     df["Status_Clean"] = df["Liquidacao_dt"].notna().map({True: "REALIZADO", False: "PENDENTE"})
     df["Status"] = df["Status_Clean"].map({"REALIZADO": "Liquidado", "PENDENTE": "A receber"})
     
-    # A data do caixa para o extrato bancário É A LIQUIDAÇÃO
+    # A DATA DE CAIXA PRINCIPAL PARA O EXTRATO É A LIQUIDAÇÃO
     df["Vencimento_dt"] = df["Liquidacao_dt"].where(df["Liquidacao_dt"].notna(), df["Vencimento_real"])
     df = df.dropna(subset=["Vencimento_dt"]).copy()
     df["Dia"] = df["Vencimento_dt"].dt.day
@@ -323,12 +319,16 @@ def _listar_cartoes_api(jwt, tipo, ini, fim, tipo_datas, cnpjs):
     return saida
 
 def buscar_cartoes_f360(jwt, d_ini, d_fim, mapa_cnpj, log=None):
+    """Busca cartões expandindo a busca para 30 dias antes (vendas retroativas de agosto que liquidaram em setembro)."""
     log = log if log is not None else []
     cnpjs = [_fmt_cnpj(c) for c in mapa_cnpj]
 
+    # EXPANDIMOS O INÍCIO DA BUSCA DE VENDAS PARA 30 DIAS ANTES DO MÊS ATUAL
+    d_ini_expandido = d_ini - timedelta(days=30)
+
     registros, vistos = [], set()
     for td in ("Vencimento", "Liquidação"):
-        for ini, fim in _janelas(d_ini, d_fim):
+        for ini, fim in _janelas(d_ini_expandido, d_fim):
             rotulo = f"Cartões / {td} {ini:%d/%m/%Y} a {fim:%d/%m/%Y}"
             try:
                 itens = _listar_cartoes_api(jwt, "Receita", ini, fim, td, cnpjs)
