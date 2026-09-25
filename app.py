@@ -10,6 +10,7 @@ from datetime import datetime, date, timedelta
 from f360_api import (
     autenticar_f360, 
     buscar_parcelas_f360, 
+    processar_parcelas_cartoes_arquivo,
     processar_detalhes_fluxo_caixa,
     IDS_CONTAS_BORELLI
 )
@@ -18,7 +19,7 @@ from f360_api import (
 # CONFIGURAÇÃO DA PÁGINA E TEMA BORELLI
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="Gelateria Borelli - Gestão de Fluxo de Caixa por Conta Bancária",
+    page_title="Gelateria Borelli - Gestão de Fluxo de Caixa",
     page_icon="🟢",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -63,6 +64,9 @@ MAPA_CNPJ_LOJA = {
     "36240923000320": "8 - GOIABEIRAS"
 }
 
+# ---------------------------------------------------------
+# CATEGORIZAÇÃO DE PLANOS DE CONTAS
+# ---------------------------------------------------------
 def categorizar_plano_contas(plano):
     if pd.isna(plano):
         return "5. DESPESAS OPERACIONAIS & VENDAS"
@@ -102,18 +106,26 @@ def carregar_receitas_f360(jwt_token, d_ini, d_fim, log=None):
     return df_rec
 
 @st.cache_data(ttl=3600)
+def carregar_cartoes_arquivo(file):
+    df = processar_parcelas_cartoes_arquivo(file, MAPA_CNPJ_LOJA)
+    if not df.empty:
+        df["Categoria_CFO"] = df.apply(categorizar_receita, axis=1)
+        df["Tipo_Movimento"] = "RECEITA"
+    return df
+
+@st.cache_data(ttl=3600)
 def carregar_detalhes_fluxo_caixa(_arquivos, nomes):
     return processar_detalhes_fluxo_caixa(_arquivos, MAPA_CNPJ_LOJA)
 
 # ---------------------------------------------------------
 # INTERFACE SIDEBAR
 # ---------------------------------------------------------
-st.markdown("<div class='main-title'>🍦 Gelateria Borelli - Gestão de Fluxo de Caixa (Visão Contas Bancárias)</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-title'>🍦 Gelateria Borelli - Gestão de Fluxo de Caixa</div>", unsafe_allow_html=True)
 st.markdown("<div class='main-subtitle'>Extrato Diário por Contas Bancárias (17 Pantanal Itaú, 51 Estação Itaú e 61 Itaú Goiabeiras)</div>", unsafe_allow_html=True)
 
 with st.sidebar:
     st.header("⚡ Integração F360 API")
-    usar_api = st.toggle("Usar API F360 (Tempo Real)", value=False)
+    usar_api = st.toggle("Usar API F360 (Tempo Real)", value=True)
     
     if usar_api:
         if "jwt" not in st.session_state or st.session_state.jwt is None:
@@ -135,21 +147,29 @@ with st.sidebar:
             log = []
             if btn_despesas and len(periodo_api) == 2:
                 try:
-                    with st.spinner("Consultando parcelas de despesas..."):
+                    with st.spinner("Consultando despesas..."):
                         df_desp_api = carregar_despesas_api_f360(st.session_state.jwt, periodo_api[0], periodo_api[1], log)
                         st.session_state.df_api_desp = df_desp_api
                         st.success(f"🟢 {len(df_desp_api) if df_desp_api is not None else 0} despesas carregadas!")
                 except Exception as e:
-                    st.error(f"Erro na API F360 (Despesas): {e}")
+                    if "401" in str(e) or "Token" in str(e):
+                        st.session_state.jwt = autenticar_f360(F360_TOKEN)
+                        st.warning("⚠️ Sessão expirada. Token renovado! Clique no botão novamente.")
+                    else:
+                        st.error(f"Erro na API F360 (Despesas): {e}")
 
             if btn_receitas and len(periodo_api) == 2:
                 try:
                     with st.spinner("Consultando parcelas de cartões e receitas..."):
                         df_rec_api = carregar_receitas_f360(st.session_state.jwt, periodo_api[0], periodo_api[1], log)
                         st.session_state.df_api_rec = df_rec_api
-                        st.success(f"🟢 {len(df_rec_api) if df_rec_api is not None else 0} receitas carregadas!")
+                        st.success(f"🟢 {len(df_rec_api) if df_rec_api is not None else 0} receitas e cartões carregados!")
                 except Exception as e:
-                    st.error(f"Erro na API F360 (Receitas): {e}")
+                    if "401" in str(e) or "Token" in str(e):
+                        st.session_state.jwt = autenticar_f360(F360_TOKEN)
+                        st.warning("⚠️ Sessão expirada. Token renovado! Clique no botão novamente.")
+                    else:
+                        st.error(f"Erro na API F360 (Receitas/Cartões): {e}")
                     
             with st.expander("🔍 Diagnóstico da API"):
                 st.code("\n".join(log) or "sem chamadas na sessão atual")
@@ -162,6 +182,7 @@ with st.sidebar:
         "Exporte em F360 > Fluxo de Caixa > Detalhes (Anexe os arquivos)",
         type=["xlsx"], accept_multiple_files=True, key="detalhes"
     )
+    file_cartoes = st.file_uploader("OU Anexe o export 'Parcelas de Cartões' (.xlsx/.csv)", type=["xlsx", "xls", "csv"], key="c")
 
 if 'filtro_kpi' not in st.session_state:
     st.session_state.filtro_kpi = "PENDENTE"
@@ -170,20 +191,32 @@ if 'filtro_kpi' not in st.session_state:
 # CARGA E PROCESSAMENTO DA FONTE DE DADOS
 # ---------------------------------------------------------
 df_despesas_fonte = st.session_state.get("df_api_desp")
-df_receitas_fonte = None
+frames_rec = []
 
+# 1. Se anexou o relatório nativo Detalhes
 if files_detalhes:
     try:
-        df_detalhes_rec, _ = carregar_detalhes_fluxo_caixa(
-            files_detalhes, tuple(f.name for f in files_detalhes)
-        )
-        df_receitas_fonte = df_detalhes_rec
-        st.sidebar.success(f"🟢 Detalhes Fluxo de Caixa: {len(df_detalhes_rec)} lançamentos (fonte oficial)")
+        df_detalhes_rec, _ = carregar_detalhes_fluxo_caixa(files_detalhes, tuple(f.name for f in files_detalhes))
+        frames_rec.append(df_detalhes_rec)
+        st.sidebar.success(f"🟢 Detalhes Fluxo de Caixa: {len(df_detalhes_rec)} lançamentos")
     except Exception as e:
         st.sidebar.error(f"Erro ao ler Detalhes Fluxo de Caixa: {e}")
 
-if df_receitas_fonte is None:
-    df_receitas_fonte = st.session_state.get("df_api_rec")
+# 2. Receitas vindas da API (Títulos + Cartões)
+rec_api = st.session_state.get("df_api_rec")
+if rec_api is not None and not rec_api.empty:
+    frames_rec.append(rec_api)
+
+# 3. Cartões Offline (se anexados)
+if file_cartoes is not None:
+    try:
+        df_c_file = carregar_cartoes_arquivo(file_cartoes)
+        frames_rec.append(df_c_file)
+        st.sidebar.success(f"🟢 Cartões File: {len(df_c_file)} lançamentos")
+    except Exception as e:
+        st.sidebar.error(f"Erro ao ler arquivo de cartões: {e}")
+
+df_receitas_fonte = pd.concat(frames_rec, ignore_index=True) if frames_rec else None
 
 df_tudo_list = []
 if df_despesas_fonte is not None and not df_despesas_fonte.empty:
@@ -274,11 +307,11 @@ if df_tudo is not None and not df_tudo.empty:
         with k4:
             st.metric("Total Receita Líquida (Vendas)", f"R$ {tot_receita_prevista:,.2f}", delta=f"Realizado: R$ {tot_receita_realizada:,.2f}")
 
-        if st.button("👁️ Ver Lançamentos de Receita (detalhado)", use_container_width=True):
+        if st.button("👁️ Ver Lançamentos de Receita e Cartões (detalhado)", use_container_width=True):
             st.session_state.ver_lancamentos_receita = not st.session_state.get("ver_lancamentos_receita", False)
 
         if st.session_state.get("ver_lancamentos_receita") and not df_receitas.empty:
-            st.subheader(f"Lançamentos na conta selecionada ({len(df_receitas)})")
+            st.subheader(f"Lançamentos de Receitas e Cartões ({len(df_receitas)} registros)")
             cols_disp = [c for c in ["Vencimento_dt", "Empresa", "Conta", "Origem", "Detalhe",
                                      "Cliente / Fornecedor", "Valor_Bruto", "Valor",
                                      "Categoria_CFO", "Status_Clean"] if c in df_receitas.columns]
@@ -425,7 +458,8 @@ else:
         <h3>🍦 Painel de Fluxo de Caixa Executivo - Gelateria Borelli</h3>
         <p>Aguardando carga dos relatórios no menu lateral para inicializar o processamento.</p>
         <ol>
-            <li>Anexe o relatório <b>Detalhes Fluxo de Caixa (.xlsx)</b> exportado do F360 para consulta por Conta Bancária.</li>
+            <li>Ative a opção <b>Usar API F360 (Tempo Real)</b> e clique em <b>📈 Buscar Receitas / Cartões (API)</b>.</li>
+            <li>OU anexe o arquivo de <b>Detalhes Fluxo de Caixa (.xlsx)</b>.</li>
         </ol>
     </div>
     """, unsafe_allow_html=True)
