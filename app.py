@@ -330,12 +330,24 @@ if df_tudo is not None and not df_tudo.empty:
         with tab2:
             st.subheader("Matriz Diária com Saldo de Encerramento (Visão Extrato Bancário F360)")
             
-            if isinstance(date_range, tuple) and len(date_range) == 2:
-                s_date, e_date = date_range
-                dias_mes = list(range(s_date.day, e_date.day + 1))
+            # ========================================================
+            # NOVA LÓGICA: FORÇA A GERAR TODOS OS DIAS DO CALENDÁRIO
+            # (Resolve o bug das colunas de dias vazios que sumiam)
+            # ========================================================
+            if isinstance(date_range, tuple) and len(date_range) > 0:
+                s_date = date_range[0]
+                e_date = date_range[1] if len(date_range) == 2 else s_date
             else:
-                df_filtered['Dia'] = pd.to_datetime(df_filtered['Vencimento_dt']).dt.day
-                dias_mes = sorted([int(d) for d in df_filtered['Dia'].dropna().unique() if d > 0])
+                s_date = df_tudo['Vencimento_dt'].min().date()
+                e_date = df_tudo['Vencimento_dt'].max().date()
+                
+            d_atual = s_date
+            dias_mes = []
+            while d_atual <= e_date:
+                if d_atual.day not in dias_mes:
+                    dias_mes.append(d_atual.day)
+                d_atual += timedelta(days=1)
+            # ========================================================
             
             # 1. Vendas puras
             piv_ent_vendas = df_rec_vendas[df_rec_vendas['Status_Clean'] == 'REALIZADO'].groupby(df_rec_vendas['Vencimento_dt'].dt.day)['Valor'].sum() if not df_rec_vendas.empty else pd.Series(0.0, index=dias_mes)
@@ -370,14 +382,14 @@ if df_tudo is not None and not df_tudo.empty:
                 
                 liq_op = v - s
                 
-                # SE A API DE SALDOS BANCÁRIOS TROUXER O FECHAMENTO REAL DO DIA, UTILIZA
+                # SE A API DE SALDOS BANCÁRIOS TROUXER O FECHAMENTO REAL DO DIA, UTILIZA ELA
                 key_saldo = (conta_selecionada, d)
                 if key_saldo in saldos_api_dict:
                     s_final = saldos_api_dict[key_saldo]
                 else:
                     s_final = s_inicial + tot_e - tot_s
                 
-                saldo_acumulado = s_final  # Transporta automaticamente
+                saldo_acumulado = s_final  # Transporta continuamente para o dia seguinte
                 
                 row_s_ini[d] = s_inicial
                 row_vendas[d] = v

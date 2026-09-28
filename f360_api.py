@@ -128,7 +128,6 @@ def buscar_saldos_bancarios_f360(jwt, d_ini, d_fim, log=None):
     try:
         r = requests.get(url, headers=headers, params=params, timeout=60)
         if r.status_code != 200:
-            # Fallback seguro caso o endpoint requira filtros específicos de conta
             log.append(f"Aviso API Saldos HTTP {r.status_code}: buscando cálculo por movimentação")
             return {}
         
@@ -411,7 +410,7 @@ def processar_parcelas_cartoes_arquivo(arquivo, mapa_cnpj):
     return _normaliza_cartoes(df.to_dict("records"), mapa_cnpj)
 
 # ---------------------------------------------------------------------------
-# RELATÓRIO OFICIAL "DETALHES FLUXO DE CAIXA.XLSX" (EXCEL NATIVO DE BACKUP)
+# RELATÓRIO OFICIAL "DETALHES FLUXO DE CAIXA.XLSX"
 # ---------------------------------------------------------------------------
 def _acha_cabecalho(df_raw, tokens):
     for idx, row in df_raw.iterrows():
@@ -521,9 +520,6 @@ def processar_detalhes_fluxo_caixa(arquivos, mapa_cnpj):
 
     return df, brutos
 
-# ---------------------------------------------------------------------------
-# FUNÇÃO PRINCIPAL DA API
-# ---------------------------------------------------------------------------
 def buscar_parcelas_f360(jwt, d_ini, d_fim, mapa_cnpj, tipo="Despesa",
                          incluir_liquidacao=True, progresso=None, log=None):
     log = log if log is not None else []
