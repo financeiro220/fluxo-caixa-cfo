@@ -84,12 +84,14 @@ def categorizar_receita(row):
     return "0. RECEITAS DE VENDAS"
 
 def carregar_despesas_api_f360(jwt_token, d_ini, d_fim, log=None):
-    df_desp = buscar_parcelas_f360(jwt_token, d_ini, d_fim, MAPA_CNPJ_LOJA, tipo="Despesa", log=log)
+    # SOLUÇÃO AQUI: Mudando tipo="Despesa" para tipo="Pagar" para forçar o Contas a Pagar exato
+    df_desp = buscar_parcelas_f360(jwt_token, d_ini, d_fim, MAPA_CNPJ_LOJA, tipo="Pagar", log=log)
     if df_desp is not None and not df_desp.empty: df_desp["Categoria_CFO"] = df_desp["Plano de Contas"].apply(categorizar_plano_contas)
     return df_desp
 
 def carregar_receitas_api_f360(jwt_token, d_ini, d_fim, log=None):
-    df_rec = buscar_parcelas_f360(jwt_token, d_ini, d_fim, MAPA_CNPJ_LOJA, tipo="Receita", log=log)
+    # SOLUÇÃO AQUI: Mudando tipo="Receita" para tipo="Receber"
+    df_rec = buscar_parcelas_f360(jwt_token, d_ini, d_fim, MAPA_CNPJ_LOJA, tipo="Receber", log=log)
     if df_rec is not None and not df_rec.empty:
         df_rec["Categoria_CFO"] = df_rec.apply(categorizar_receita, axis=1)
         df_rec["Tipo_Movimento"] = "RECEITA"
@@ -145,22 +147,37 @@ with st.sidebar:
 if 'filtro_kpi' not in st.session_state: st.session_state.filtro_kpi = "PENDENTE"
 
 # ---------------------------------------------------------
-# PROCESSAMENTO DE DADOS
+# PROCESSAMENTO DE DADOS E CORREÇÃO DO FERIADO
 # ---------------------------------------------------------
 df_tudo_list = []
 if st.session_state.get("df_api_desp") is not None and not st.session_state["df_api_desp"].empty: df_tudo_list.append(st.session_state["df_api_desp"])
 if st.session_state.get("df_api_rec") is not None and not st.session_state["df_api_rec"].empty: df_tudo_list.append(st.session_state["df_api_rec"])
 df_tudo = pd.concat(df_tudo_list, ignore_index=True) if df_tudo_list else None
 
-# REGRA: EMPURRAR FINAIS DE SEMANA E FERIADOS PARA O PRÓXIMO DIA ÚTIL
-def proximo_dia_util(d):
-    if pd.isna(d): return d
+def proximo_dia_util(row):
+    """
+    CORREÇÃO FUNDAMENTAL: 
+    Se a despesa já foi paga (REALIZADO), mantemos o dia exato (mesmo que seja sábado).
+    Se for PENDENTE (Previsão de Título), empurramos o vencimento para Segunda-feira.
+    """
+    d = row['Vencimento_dt']
+    status = row.get('Status_Clean', 'PENDENTE')
+    
+    if pd.isna(d): 
+        return d
+        
     d_ts = pd.to_datetime(d)
-    while d_ts.weekday() >= 5 or d_ts.strftime('%Y-%m-%d') in FERIADOS: d_ts += timedelta(days=1)
+    
+    if status == 'REALIZADO':
+        return d_ts
+        
+    while d_ts.weekday() >= 5 or d_ts.strftime('%Y-%m-%d') in FERIADOS: 
+        d_ts += timedelta(days=1)
+        
     return d_ts
 
 if df_tudo is not None and not df_tudo.empty:
-    df_tudo['Vencimento_dt'] = df_tudo['Vencimento_dt'].apply(proximo_dia_util)
+    df_tudo['Vencimento_dt'] = df_tudo.apply(proximo_dia_util, axis=1)
 
 # ---------------------------------------------------------
 # RENDERIZAÇÃO DO DASHBOARD
@@ -212,9 +229,6 @@ if df_tudo is not None and not df_tudo.empty:
     with tab1:
         st.subheader("Matriz Diária com Saldo de Encerramento (Visão Extrato Bancário F360)")
         
-        # =========================================================================
-        # SOLUÇÃO DO KEYERROR: GARANTE AS COLUNAS VISÍVEIS MESMO SEM DADOS NA API
-        # =========================================================================
         dias_visiveis = []
         if isinstance(date_range, tuple) and len(date_range) == 2:
             d_temp = date_range[0]
@@ -225,7 +239,6 @@ if df_tudo is not None and not df_tudo.empty:
         else:
             dias_visiveis = list(range(min_date.day, max_date.day + 1))
 
-        # Sempre calcula todos os 31 dias possíveis do mês internamente para não quebrar
         dias_mes_calc = list(range(1, 32))
         
         df_rec_total = df_filtered[df_filtered['Tipo_Movimento'] == 'RECEITA']
