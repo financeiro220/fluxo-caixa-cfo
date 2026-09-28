@@ -65,7 +65,7 @@ MAPA_CNPJ_LOJA = {
     "36240923000320": "8 - GOIABEIRAS"
 }
 
-# SALDOS BACKUP SE A API DE EXTRATO ESTIVER FORA DO AR NO MOMENTO
+# SALDOS OFICIAIS FIXADOS DE 31/08 (Usados em caso da API de saldos retornar 404)
 SALDOS_INICIAIS_AGOSTO = {
     "17 Pantanal Itaú": 24053.13,
     "36 MJL": 500.00,
@@ -330,10 +330,9 @@ if df_tudo is not None and not df_tudo.empty:
         with tab2:
             st.subheader("Matriz Diária com Saldo de Encerramento (Visão Extrato Bancário F360)")
             
-            # ========================================================
-            # NOVA LÓGICA: FORÇA A GERAR TODOS OS DIAS DO CALENDÁRIO
-            # (Resolve o bug das colunas de dias vazios que sumiam)
-            # ========================================================
+            # =========================================================================
+            # CORREÇÃO: CRIA AS COLUNAS DE TODOS OS DIAS DO CALENDÁRIO (SEM PULAR)
+            # =========================================================================
             if isinstance(date_range, tuple) and len(date_range) > 0:
                 s_date = date_range[0]
                 e_date = date_range[1] if len(date_range) == 2 else s_date
@@ -347,7 +346,7 @@ if df_tudo is not None and not df_tudo.empty:
                 if d_atual.day not in dias_mes:
                     dias_mes.append(d_atual.day)
                 d_atual += timedelta(days=1)
-            # ========================================================
+            # =========================================================================
             
             # 1. Vendas puras
             piv_ent_vendas = df_rec_vendas[df_rec_vendas['Status_Clean'] == 'REALIZADO'].groupby(df_rec_vendas['Vencimento_dt'].dt.day)['Valor'].sum() if not df_rec_vendas.empty else pd.Series(0.0, index=dias_mes)
@@ -363,7 +362,7 @@ if df_tudo is not None and not df_tudo.empty:
 
             row_s_ini, row_vendas, row_tin, row_tot_ent, row_saidas, row_tout, row_tot_sai, row_liq_op, row_saldo_final = {}, {}, {}, {}, {}, {}, {}, {}, {}
 
-            # O SALDO INICIAL VEM DA API OU DO MAPA DE RETAGUARDA
+            # O SALDO INICIAL FIXADO DE 31/08
             if conta_selecionada in SALDOS_INICIAIS_AGOSTO:
                 saldo_acumulado = SALDOS_INICIAIS_AGOSTO[conta_selecionada]
             else:
