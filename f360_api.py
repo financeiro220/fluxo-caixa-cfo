@@ -1,6 +1,8 @@
 """
 f360_api.py - Integração com a API pública do F360.
-Solução para vendas de Cartões/iFood de meses anteriores que liquidam no mês atual (ex: Venda em Agosto, Liquidação em Setembro).
+- Busca retroativa de liquidações do mês anterior para cobrir os primeiros dias do mês.
+- Mapeamento estrito por Contas Bancárias (17, 36, 51, 52, 61).
+- Normalização de Planos de Contas e Suporte a Previsão Orçamentária.
 """
 import json
 import re
@@ -12,7 +14,6 @@ import requests
 
 BASE = "https://financas.f360.com.br"
 JANELA_DIAS = 30
-
 CARTOES_ENDPOINT = "ParcelasDeCartoesPublicAPI/ListarParcelasDeCartoes"
 
 IDS_CONTAS_BORELLI = {
@@ -204,7 +205,7 @@ def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
     return df
 
 # ---------------------------------------------------------------------------
-# PARCELAS DE CARTÕES (API + FILE)
+# PARCELAS DE CARTÕES (API)
 # ---------------------------------------------------------------------------
 _ALIAS = {
     "empresa": ["empresa", "nomeempresa", "cnpjempresa", "cnpj"],
@@ -215,7 +216,7 @@ _ALIAS = {
     "bruto": ["vbruto", "valorbruto"],
     "liquido": ["vliquido", "valorliquido"],
     "conta": ["conta", "contaliquidacao", "contadeliquidacao"],
-    "liquidacao": ["liquid", "liquidacao", "dataliquidacao"], # Adicionado 'liquid' com ponto
+    "liquidacao": ["liquid", "liquidacao", "dataliquidacao"],
     "id": ["id", "parcelaid", "cartaoid"],
     "modalidade": ["modalidade"],
 }
@@ -287,7 +288,6 @@ def _normaliza_cartoes(registros, mapa_cnpj):
     df["Status_Clean"] = df["Liquidacao_dt"].notna().map({True: "REALIZADO", False: "PENDENTE"})
     df["Status"] = df["Status_Clean"].map({"REALIZADO": "Liquidado", "PENDENTE": "A receber"})
     
-    # A DATA DE CAIXA PRINCIPAL PARA O EXTRATO É A LIQUIDAÇÃO
     df["Vencimento_dt"] = df["Liquidacao_dt"].where(df["Liquidacao_dt"].notna(), df["Vencimento_real"])
     df = df.dropna(subset=["Vencimento_dt"]).copy()
     df["Dia"] = df["Vencimento_dt"].dt.day
@@ -319,11 +319,10 @@ def _listar_cartoes_api(jwt, tipo, ini, fim, tipo_datas, cnpjs):
     return saida
 
 def buscar_cartoes_f360(jwt, d_ini, d_fim, mapa_cnpj, log=None):
-    """Busca cartões expandindo a busca para 30 dias antes (vendas retroativas de agosto que liquidaram em setembro)."""
+    """Busca vendas com margem retroativa de 30 dias para pegar liquidações no início do mês."""
     log = log if log is not None else []
     cnpjs = [_fmt_cnpj(c) for c in mapa_cnpj]
 
-    # EXPANDIMOS O INÍCIO DA BUSCA DE VENDAS PARA 30 DIAS ANTES DO MÊS ATUAL
     d_ini_expandido = d_ini - timedelta(days=30)
 
     registros, vistos = [], set()
