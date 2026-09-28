@@ -84,14 +84,14 @@ def categorizar_receita(row):
     return "0. RECEITAS DE VENDAS"
 
 def carregar_despesas_api_f360(jwt_token, d_ini, d_fim, log=None):
-    # SOLUÇÃO AQUI: Mudando tipo="Despesa" para tipo="Pagar" para forçar o Contas a Pagar exato
-    df_desp = buscar_parcelas_f360(jwt_token, d_ini, d_fim, MAPA_CNPJ_LOJA, tipo="Pagar", log=log)
+    # CORREÇÃO: Voltando o termo estrito exigido pela API da F360 ("Despesa")
+    df_desp = buscar_parcelas_f360(jwt_token, d_ini, d_fim, MAPA_CNPJ_LOJA, tipo="Despesa", log=log)
     if df_desp is not None and not df_desp.empty: df_desp["Categoria_CFO"] = df_desp["Plano de Contas"].apply(categorizar_plano_contas)
     return df_desp
 
 def carregar_receitas_api_f360(jwt_token, d_ini, d_fim, log=None):
-    # SOLUÇÃO AQUI: Mudando tipo="Receita" para tipo="Receber"
-    df_rec = buscar_parcelas_f360(jwt_token, d_ini, d_fim, MAPA_CNPJ_LOJA, tipo="Receber", log=log)
+    # CORREÇÃO: Voltando o termo estrito exigido pela API da F360 ("Receita")
+    df_rec = buscar_parcelas_f360(jwt_token, d_ini, d_fim, MAPA_CNPJ_LOJA, tipo="Receita", log=log)
     if df_rec is not None and not df_rec.empty:
         df_rec["Categoria_CFO"] = df_rec.apply(categorizar_receita, axis=1)
         df_rec["Tipo_Movimento"] = "RECEITA"
@@ -133,7 +133,6 @@ with st.sidebar:
         log = []
         if btn_sincronizar and len(periodo_api) == 2:
             try:
-                # FORÇA BUSCA DESDE O DIA 1 DO MÊS PARA GARANTIR CÁLCULOS
                 d_ini_api = periodo_api[0].replace(day=1)
                 d_fim_api = periodo_api[1]
 
