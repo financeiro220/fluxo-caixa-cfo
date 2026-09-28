@@ -10,6 +10,7 @@ from datetime import datetime, date, timedelta
 from f360_api import (
     autenticar_f360, 
     buscar_parcelas_f360, 
+    buscar_saldos_bancarios_f360,
     processar_parcelas_cartoes_arquivo,
     processar_detalhes_fluxo_caixa,
     IDS_CONTAS_BORELLI
@@ -19,7 +20,7 @@ from f360_api import (
 # CONFIGURAÇÃO DA PÁGINA E TEMA BORELLI
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="Gelateria Borelli - Gestão de Fluxo de Caixa",
+    page_title="Gelateria Borelli - Gestão de Fluxo de Caixa Automático API",
     page_icon="🟢",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -64,7 +65,7 @@ MAPA_CNPJ_LOJA = {
     "36240923000320": "8 - GOIABEIRAS"
 }
 
-# SALDOS OFICIAIS DE FECHAMENTO EM 31/08/2026 PARA USO EM 01/09/2026
+# SALDOS BACKUP SE A API DE EXTRATO ESTIVER FORA DO AR NO MOMENTO
 SALDOS_INICIAIS_AGOSTO = {
     "17 Pantanal Itaú": 24053.13,
     "36 MJL": 500.00,
@@ -107,122 +108,71 @@ def carregar_despesas_api_f360(jwt_token, d_ini, d_fim, log=None):
         df_desp["Categoria_CFO"] = df_desp["Plano de Contas"].apply(categorizar_plano_contas)
     return df_desp
 
-def carregar_receitas_f360(jwt_token, d_ini, d_fim, log=None):
+def carregar_receitas_api_f360(jwt_token, d_ini, d_fim, log=None):
     df_rec = buscar_parcelas_f360(jwt_token, d_ini, d_fim, MAPA_CNPJ_LOJA, tipo="Receita", log=log)
     if df_rec is not None and not df_rec.empty:
         df_rec["Categoria_CFO"] = df_rec.apply(categorizar_receita, axis=1)
         df_rec["Tipo_Movimento"] = "RECEITA"
     return df_rec
 
-@st.cache_data(ttl=3600)
-def carregar_cartoes_arquivo(file):
-    df = processar_parcelas_cartoes_arquivo(file, MAPA_CNPJ_LOJA)
-    if not df.empty:
-        df["Categoria_CFO"] = df.apply(categorizar_receita, axis=1)
-        df["Tipo_Movimento"] = "RECEITA"
-    return df
-
-@st.cache_data(ttl=3600)
-def carregar_detalhes_fluxo_caixa(_arquivos, nomes):
-    return processar_detalhes_fluxo_caixa(_arquivos, MAPA_CNPJ_LOJA)
-
 # ---------------------------------------------------------
-# INTERFACE SIDEBAR
+# INTERFACE SIDEBAR (TOTALMENTE AUTOMÁTICA VIA API)
 # ---------------------------------------------------------
-st.markdown("<div class='main-title'>🍦 Gelateria Borelli - Gestão de Fluxo de Caixa</div>", unsafe_allow_html=True)
-st.markdown("<div class='main-subtitle'>Extrato Diário por Contas Bancárias (17 Pantanal Itaú, 51 Estação Itaú, 61 Itaú Goiabeiras, 52 RT e 36 MJL)</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-title'>🍦 Gelateria Borelli - Gestão de Fluxo de Caixa (100% API)</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-subtitle'>Extrato Diário Automatizado por Contas Bancárias (17 Pantanal Itaú, 51 Estação Itaú, 61 Itaú Goiabeiras, 52 RT e 36 MJL)</div>", unsafe_allow_html=True)
 
 with st.sidebar:
-    st.header("⚡ Integração F360 API")
-    usar_api = st.toggle("Usar API F360 (Tempo Real)", value=True)
+    st.header("⚡ Sincronização API F360")
     
-    if usar_api:
-        if "jwt" not in st.session_state or st.session_state.jwt is None:
-            st.session_state.jwt = autenticar_f360(F360_TOKEN)
-            
-        if st.session_state.jwt:
-            st.success("🟢 Sessão JWT válida")
-            hoje = date(2026, 9, 1)
-            periodo_api = st.date_input(
-                "Período de Busca", 
-                (hoje.replace(day=1), hoje + timedelta(days=30)), 
-                format="DD/MM/YYYY"
-            )
-            
-            st.markdown("---")
-            btn_despesas = st.button("🚀 Buscar Despesas / Parcelas (API)", use_container_width=True)
-            btn_receitas = st.button("📈 Buscar Receitas / Cartões (API)", use_container_width=True)
-            
-            log = []
-            if btn_despesas and len(periodo_api) == 2:
-                try:
-                    with st.spinner("Consultando despesas..."):
-                        df_desp_api = carregar_despesas_api_f360(st.session_state.jwt, periodo_api[0], periodo_api[1], log)
-                        st.session_state.df_api_desp = df_desp_api
-                        st.success(f"🟢 {len(df_desp_api) if df_desp_api is not None else 0} despesas carregadas!")
-                except Exception as e:
-                    if "401" in str(e) or "Token" in str(e):
-                        st.session_state.jwt = autenticar_f360(F360_TOKEN)
-                        st.warning("⚠️ Sessão expirada. Token renovado! Clique no botão novamente.")
-                    else:
-                        st.error(f"Erro na API F360 (Despesas): {e}")
-
-            if btn_receitas and len(periodo_api) == 2:
-                try:
-                    with st.spinner("Consultando parcelas de cartões e receitas..."):
-                        df_rec_api = carregar_receitas_f360(st.session_state.jwt, periodo_api[0], periodo_api[1], log)
-                        st.session_state.df_api_rec = df_rec_api
-                        st.success(f"🟢 {len(df_rec_api) if df_rec_api is not None else 0} receitas e cartões carregados!")
-                except Exception as e:
-                    if "401" in str(e) or "Token" in str(e):
-                        st.session_state.jwt = autenticar_f360(F360_TOKEN)
-                        st.warning("⚠️ Sessão expirada. Token renovado! Clique no botão novamente.")
-                    else:
-                        st.error(f"Erro na API F360 (Receitas/Cartões): {e}")
+    if "jwt" not in st.session_state or st.session_state.jwt is None:
+        st.session_state.jwt = autenticar_f360(F360_TOKEN)
+        
+    if st.session_state.jwt:
+        st.success("🟢 Conexão com F360 Ativa")
+        hoje = date(2026, 9, 1)
+        periodo_api = st.date_input(
+            "Período de Busca", 
+            (hoje.replace(day=1), hoje + timedelta(days=30)), 
+            format="DD/MM/YYYY"
+        )
+        
+        st.markdown("---")
+        btn_sincronizar = st.button("🚀 Sincronizar Tudo via API (Tempo Real)", use_container_width=True)
+        
+        log = []
+        if btn_sincronizar and len(periodo_api) == 2:
+            try:
+                with st.spinner("Sincronizando extratos, cartões e despesas com a F360..."):
+                    df_desp_api = carregar_despesas_api_f360(st.session_state.jwt, periodo_api[0], periodo_api[1], log)
+                    df_rec_api = carregar_receitas_api_f360(st.session_state.jwt, periodo_api[0], periodo_api[1], log)
+                    saldos_api = buscar_saldos_bancarios_f360(st.session_state.jwt, periodo_api[0], periodo_api[1], log)
                     
-            with st.expander("🔍 Diagnóstico da API"):
-                st.code("\n".join(log) or "sem chamadas na sessão atual")
-        else:
-            st.error("🔴 Falha na autenticação F360")
-            
-    st.divider()
-    st.header("🧾 Detalhes Fluxo de Caixa (F360, fonte oficial)")
-    files_detalhes = st.file_uploader(
-        "Exporte em F360 > Fluxo de Caixa > Detalhes (Anexe os arquivos)",
-        type=["xlsx"], accept_multiple_files=True, key="detalhes"
-    )
-    file_cartoes = st.file_uploader("OU Anexe o export 'Parcelas de Cartões' (.xlsx/.csv)", type=["xlsx", "xls", "csv"], key="c")
+                    st.session_state.df_api_desp = df_desp_api
+                    st.session_state.df_api_rec = df_rec_api
+                    st.session_state.saldos_api = saldos_api
+                    
+                    st.success("🟢 Dados sincronizados com sucesso!")
+            except Exception as e:
+                if "401" in str(e) or "Token" in str(e):
+                    st.session_state.jwt = autenticar_f360(F360_TOKEN)
+                    st.warning("⚠️ Token renovado! Clique no botão de sincronização novamente.")
+                else:
+                    st.error(f"Erro na Sincronização: {e}")
+                
+        with st.expander("🔍 Log de Comunicação API"):
+            st.code("\n".join(log) or "sem chamadas na sessão atual")
+    else:
+        st.error("🔴 Falha na autenticação F360")
 
 if 'filtro_kpi' not in st.session_state:
     st.session_state.filtro_kpi = "PENDENTE"
 
 # ---------------------------------------------------------
-# CARGA E PROCESSAMENTO DA FONTE DE DADOS
+# PROCESSAMENTO DE DADOS EXCLUSIVAMENTE VIA API
 # ---------------------------------------------------------
 df_despesas_fonte = st.session_state.get("df_api_desp")
-frames_rec = []
-
-if files_detalhes:
-    try:
-        df_detalhes_rec, _ = carregar_detalhes_fluxo_caixa(files_detalhes, tuple(f.name for f in files_detalhes))
-        frames_rec.append(df_detalhes_rec)
-        st.sidebar.success(f"🟢 Detalhes Fluxo de Caixa: {len(df_detalhes_rec)} lançamentos")
-    except Exception as e:
-        st.sidebar.error(f"Erro ao ler Detalhes Fluxo de Caixa: {e}")
-
-rec_api = st.session_state.get("df_api_rec")
-if rec_api is not None and not rec_api.empty:
-    frames_rec.append(rec_api)
-
-if file_cartoes is not None:
-    try:
-        df_c_file = carregar_cartoes_arquivo(file_cartoes)
-        frames_rec.append(df_c_file)
-        st.sidebar.success(f"🟢 Cartões File: {len(df_c_file)} lançamentos")
-    except Exception as e:
-        st.sidebar.error(f"Erro ao ler arquivo de cartões: {e}")
-
-df_receitas_fonte = pd.concat(frames_rec, ignore_index=True) if frames_rec else None
+df_receitas_fonte = st.session_state.get("df_api_rec")
+saldos_api_dict = st.session_state.get("saldos_api", {})
 
 df_tudo_list = []
 if df_despesas_fonte is not None and not df_despesas_fonte.empty:
@@ -380,7 +330,6 @@ if df_tudo is not None and not df_tudo.empty:
         with tab2:
             st.subheader("Matriz Diária com Saldo de Encerramento (Visão Extrato Bancário F360)")
             
-            # GARANTE A SEQUÊNCIA DE TODOS OS DIAS DO PERÍODO SELECIONADO (EX: 1 A 30)
             if isinstance(date_range, tuple) and len(date_range) == 2:
                 s_date, e_date = date_range
                 dias_mes = list(range(s_date.day, e_date.day + 1))
@@ -402,7 +351,7 @@ if df_tudo is not None and not df_tudo.empty:
 
             row_s_ini, row_vendas, row_tin, row_tot_ent, row_saidas, row_tout, row_tot_sai, row_liq_op, row_saldo_final = {}, {}, {}, {}, {}, {}, {}, {}, {}
 
-            # DETERMINA O SALDO INICIAL FIXADO DE 31/08/2026
+            # O SALDO INICIAL VEM DA API OU DO MAPA DE RETAGUARDA
             if conta_selecionada in SALDOS_INICIAIS_AGOSTO:
                 saldo_acumulado = SALDOS_INICIAIS_AGOSTO[conta_selecionada]
             else:
@@ -420,9 +369,15 @@ if df_tudo is not None and not df_tudo.empty:
                 tot_s = s + tout
                 
                 liq_op = v - s
-                s_final = s_inicial + tot_e - tot_s
                 
-                saldo_acumulado = s_final  # Transporta sem lacunas para o dia seguinte
+                # SE A API DE SALDOS BANCÁRIOS TROUXER O FECHAMENTO REAL DO DIA, UTILIZA
+                key_saldo = (conta_selecionada, d)
+                if key_saldo in saldos_api_dict:
+                    s_final = saldos_api_dict[key_saldo]
+                else:
+                    s_final = s_inicial + tot_e - tot_s
+                
+                saldo_acumulado = s_final  # Transporta automaticamente
                 
                 row_s_ini[d] = s_inicial
                 row_vendas[d] = v
@@ -437,7 +392,7 @@ if df_tudo is not None and not df_tudo.empty:
                 row_saldo_final[d] = s_final
 
             df_extrato_diario = pd.DataFrame([
-                {"Linha de Extrato": "0. 🏦 SALDO INICIAL DO DIA (Transportado de 31/08)", **row_s_ini},
+                {"Linha de Extrato": "0. 🏦 SALDO INICIAL DO DIA (Transportado)", **row_s_ini},
                 {"Linha de Extrato": "1. (+) Total Vendas Liquidadas", **row_vendas},
                 {"Linha de Extrato": "2. (+) Transferências Recebidas (Mútuo / Entradas)", **row_tin},
                 {"Linha de Extrato": "3. (=) TOTAL DE ENTRADAS (Vendas + Transferências)", **row_tot_ent},
@@ -445,7 +400,7 @@ if df_tudo is not None and not df_tudo.empty:
                 {"Linha de Extrato": "5. (-) Transferências Concedidas (Empréstimo Mútuo / Saídas)", **row_tout},
                 {"Linha de Extrato": "6. (=) TOTAL DE SAÍDAS (Despesas + Transferências)", **row_tot_sai},
                 {"Linha de Extrato": "7. (=) Resultado Líquido Operacional (Vendas - Saídas)", **row_liq_op},
-                {"Linha de Extrato": "8. 🏦 SALDO FINAL EM CONTA BANCÁRIA (Inicial + Entradas - Saídas)", **row_saldo_final}
+                {"Linha de Extrato": "8. 🏦 SALDO FINAL EM CONTA BANCÁRIA (API / Conciliado)", **row_saldo_final}
             ])
             
             cols_order = ["Linha de Extrato"] + dias_mes
@@ -487,11 +442,10 @@ if df_tudo is not None and not df_tudo.empty:
 else:
     st.markdown("""
     <div class='welcome-card'>
-        <h3>🍦 Painel de Fluxo de Caixa Executivo - Gelateria Borelli</h3>
-        <p>Aguardando carga dos relatórios no menu lateral para inicializar o processamento.</p>
+        <h3>🍦 Painel de Fluxo de Caixa Executivo - Gelateria Borelli (100% API)</h3>
+        <p>Aguardando sincronização automática no menu lateral.</p>
         <ol>
-            <li>Ative a opção <b>Usar API F360 (Tempo Real)</b> e clique em <b>📈 Buscar Receitas / Cartões (API)</b>.</li>
-            <li>OU anexe o arquivo de <b>Detalhes Fluxo de Caixa (.xlsx)</b>.</li>
+            <li>Clique no botão <b>🚀 Sincronizar Tudo via API (Tempo Real)</b> no menu lateral.</li>
         </ol>
     </div>
     """, unsafe_allow_html=True)

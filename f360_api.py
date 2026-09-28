@@ -1,8 +1,7 @@
 """
-f360_api.py - Integração com a API pública do F360.
-- Busca retroativa de liquidações do mês anterior para cobrir os primeiros dias do mês.
-- Mapeamento estrito por Contas Bancárias (17, 36, 51, 52, 61).
-- Normalização de Planos de Contas e Suporte a Previsão Orçamentária.
+f360_api.py - Integração Total com a API Pública F360.
+Mapeamento por Contas Bancárias (17, 36, 51, 52, 61), Parcelas de Títulos,
+Parcelas de Cartões e Saldos Bancários de Encerramento em Tempo Real via API.
 """
 import json
 import re
@@ -14,7 +13,9 @@ import requests
 
 BASE = "https://financas.f360.com.br"
 JANELA_DIAS = 30
+
 CARTOES_ENDPOINT = "ParcelasDeCartoesPublicAPI/ListarParcelasDeCartoes"
+SALDOS_ENDPOINT = "ExtratoBancarioPublicAPI/ListarSaldosDasContas"
 
 IDS_CONTAS_BORELLI = {
     "17": "17 Pantanal Itaú",
@@ -109,6 +110,47 @@ def _mapear_conta_para_loja(conta_str):
     elif "36" in c or "MJL" in c_upper:
         return "36 MJL"
     return c or "17 Pantanal Itaú"
+
+# ---------------------------------------------------------------------------
+# SALDOS BANCÁRIOS DIÁRIOS (API DE EXTRATO F360)
+# ---------------------------------------------------------------------------
+def buscar_saldos_bancarios_f360(jwt, d_ini, d_fim, log=None):
+    """Consulta os saldos bancários de fechamento e abertura em tempo real via API F360."""
+    log = log if log is not None else []
+    headers = {"Authorization": f"Bearer {jwt}", "Content-Type": "application/json"}
+    url = f"{BASE}/{SALDOS_ENDPOINT}"
+    
+    params = {
+        "inicio": d_ini.isoformat(),
+        "fim": d_fim.isoformat()
+    }
+    
+    try:
+        r = requests.get(url, headers=headers, params=params, timeout=60)
+        if r.status_code != 200:
+            # Fallback seguro caso o endpoint requira filtros específicos de conta
+            log.append(f"Aviso API Saldos HTTP {r.status_code}: buscando cálculo por movimentação")
+            return {}
+        
+        corpo = r.json()
+        res = corpo.get("Result") if isinstance(corpo, dict) else corpo
+        saldos_por_conta = {}
+        
+        if isinstance(res, list):
+            for item in res:
+                conta_nome = _mapear_conta_para_loja(item.get("Conta") or item.get("NomeConta"))
+                data_saldo = _data(item.get("Data") or item.get("DataDoSaldo"))
+                valor_saldo = _num(item.get("SaldoFinal") or item.get("Saldo"))
+                
+                if pd.notna(data_saldo):
+                    key = (conta_nome, data_saldo.day)
+                    saldos_por_conta[key] = valor_saldo
+                    
+        log.append(f"Saldos Bancários API: {len(saldos_por_conta)} registros de saldo lidos")
+        return saldos_por_conta
+    except Exception as e:
+        log.append(f"Erro ao consultar API de Saldos Bancários: {e}")
+        return {}
 
 # ---------------------------------------------------------------------------
 # PARCELAS DE TÍTULOS (API)
@@ -319,7 +361,6 @@ def _listar_cartoes_api(jwt, tipo, ini, fim, tipo_datas, cnpjs):
     return saida
 
 def buscar_cartoes_f360(jwt, d_ini, d_fim, mapa_cnpj, log=None):
-    """Busca vendas com margem retroativa de 30 dias para pegar liquidações no início do mês."""
     log = log if log is not None else []
     cnpjs = [_fmt_cnpj(c) for c in mapa_cnpj]
 
@@ -370,7 +411,7 @@ def processar_parcelas_cartoes_arquivo(arquivo, mapa_cnpj):
     return _normaliza_cartoes(df.to_dict("records"), mapa_cnpj)
 
 # ---------------------------------------------------------------------------
-# RELATÓRIO OFICIAL "DETALHES FLUXO DE CAIXA.XLSX" (EXCEL NATIVO)
+# RELATÓRIO OFICIAL "DETALHES FLUXO DE CAIXA.XLSX" (EXCEL NATIVO DE BACKUP)
 # ---------------------------------------------------------------------------
 def _acha_cabecalho(df_raw, tokens):
     for idx, row in df_raw.iterrows():
