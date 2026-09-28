@@ -98,9 +98,6 @@ def carregar_receitas_api_f360(jwt_token, d_ini, d_fim, log=None):
 # ---------------------------------------------------------
 # INTERFACE SIDEBAR (SALDOS INICIAIS DINÂMICOS)
 # ---------------------------------------------------------
-st.markdown("<div class='main-title'>🍦 Gelateria Borelli - Gestão de Fluxo de Caixa (100% API)</div>", unsafe_allow_html=True)
-st.markdown("<div class='main-subtitle'>Extrato Diário Automatizado por Contas Bancárias</div>", unsafe_allow_html=True)
-
 with st.sidebar:
     st.header("⚡ Sincronização API F360")
     
@@ -215,10 +212,21 @@ if df_tudo is not None and not df_tudo.empty:
     with tab1:
         st.subheader("Matriz Diária com Saldo de Encerramento (Visão Extrato Bancário F360)")
         
-        # LÓGICA DE TRANSPORTE CONTÍNUO (CALCULA DESDE O DIA 1 SEMPRE)
-        primeiro_dia_calc = min_date.replace(day=1)
-        ultimo_dia_calc = max_date
-        dias_mes_calc = list(range(1, ultimo_dia_calc.day + 1))
+        # =========================================================================
+        # SOLUÇÃO DO KEYERROR: GARANTE AS COLUNAS VISÍVEIS MESMO SEM DADOS NA API
+        # =========================================================================
+        dias_visiveis = []
+        if isinstance(date_range, tuple) and len(date_range) == 2:
+            d_temp = date_range[0]
+            while d_temp <= date_range[1]:
+                if d_temp.day not in dias_visiveis:
+                    dias_visiveis.append(d_temp.day)
+                d_temp += timedelta(days=1)
+        else:
+            dias_visiveis = list(range(min_date.day, max_date.day + 1))
+
+        # Sempre calcula todos os 31 dias possíveis do mês internamente para não quebrar
+        dias_mes_calc = list(range(1, 32))
         
         df_rec_total = df_filtered[df_filtered['Tipo_Movimento'] == 'RECEITA']
         df_desp_total = df_filtered[df_filtered['Tipo_Movimento'] == 'DESPESA']
@@ -230,18 +238,12 @@ if df_tudo is not None and not df_tudo.empty:
 
         row_s_ini, row_vendas, row_tin, row_tot_ent, row_saidas, row_tout, row_tot_sai, row_liq_op, row_saldo_final = {}, {}, {}, {}, {}, {}, {}, {}, {}
 
-        # PEGA O SALDO DOS CAMPOS DA BARRA LATERAL (SEM FIXAÇÃO DE CÓDIGO)
+        # PEGA O SALDO DOS CAMPOS DA BARRA LATERAL
         if conta_selecionada in SALDOS_INICIAIS:
             saldo_acumulado = SALDOS_INICIAIS[conta_selecionada]
         else:
             saldo_acumulado = sum(SALDOS_INICIAIS.values())
 
-        # QUAIS DIAS VÃO APARECER NA TELA?
-        dias_visiveis = []
-        if isinstance(date_range, tuple) and len(date_range) == 2:
-            dias_visiveis = list(range(date_range[0].day, date_range[1].day + 1))
-
-        # CALCULA TODOS OS DIAS (PARA NÃO QUEBRAR O SALDO) MAS SÓ GUARDA OS VISÍVEIS
         for d in dias_mes_calc:
             s_inicial = saldo_acumulado
             v = p_vendas.get(d, 0.0)
@@ -254,6 +256,7 @@ if df_tudo is not None and not df_tudo.empty:
             s_final = s_inicial + tot_e - tot_s
             saldo_acumulado = s_final 
             
+            # Só armazena para visualização os dias que a tela está pedindo
             if d in dias_visiveis:
                 row_s_ini[d] = s_inicial
                 row_vendas[d] = v
@@ -283,7 +286,6 @@ if df_tudo is not None and not df_tudo.empty:
             st.warning("Nenhum dia selecionado no filtro.")
             
     with tab2:
-        # AQUI FICOU O DRE (CÓDIGO OMITIDO POR BREVIDADE MAS INTACTO NO APP)
         st.subheader("Demonstrativo do Fluxo de Caixa (Previsto vs. Realizado)")
         dre_list = [{"Categoria CFO": "0. RECEITAS DE VENDAS / ENTRADAS (LÍQUIDO)", "Previsto (R$)": f"R$ {tot_receita_prevista:,.2f}", "Realizado (R$)": f"R$ {tot_receita_realizada:,.2f}", "Variação (R$)": f"R$ {tot_receita_realizada - tot_receita_prevista:,.2f}", "% do Total": "100.0%"}]
         cats = ["1. FORNECEDORES / MERCADORIAS (CMV)", "2. IMPOSTOS SOBRE VENDAS", "3. DESPESAS DE OCUPAÇÃO", "4. FOLHA DE PAGAMENTO & ENCARGOS", "5. DESPESAS OPERACIONAIS & VENDAS", "6. AMORTIZAÇÃO DE DÍVIDAS & CAPITAL"]
