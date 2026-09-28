@@ -11,8 +11,6 @@ from f360_api import (
     autenticar_f360, 
     buscar_parcelas_f360, 
     buscar_saldos_bancarios_f360,
-    processar_parcelas_cartoes_arquivo,
-    processar_detalhes_fluxo_caixa,
     IDS_CONTAS_BORELLI
 )
 
@@ -20,7 +18,7 @@ from f360_api import (
 # CONFIGURAÇÃO DA PÁGINA E TEMA BORELLI
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="Gelateria Borelli - Gestão de Fluxo de Caixa Automático API",
+    page_title="Gelateria Borelli - Gestão de Fluxo de Caixa",
     page_icon="🟢",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -43,14 +41,6 @@ st.markdown("""
         color: #A0AAB0;
         margin-bottom: 20px;
     }
-    .welcome-card {
-        background-color: #161B22;
-        border: 1px solid #30363D;
-        border-left: 6px solid #00875A;
-        border-radius: 8px;
-        padding: 25px;
-        margin-top: 20px;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -65,24 +55,14 @@ MAPA_CNPJ_LOJA = {
     "36240923000320": "8 - GOIABEIRAS"
 }
 
-# SALDOS OFICIAIS FIXADOS DE 31/08 (Usados em caso da API de saldos retornar 404)
-SALDOS_INICIAIS_AGOSTO = {
-    "17 Pantanal Itaú": 24053.13,
-    "36 MJL": 500.00,
-    "51 Estação Itaú": 333.38,
-    "52 RT": 3434.92,
-    "61 Itaú Goiabeiras": 300.77
-}
-
-# FERIADOS CONHECIDOS
+# FERIADOS NACIONAIS / REGIONAIS CONHECIDOS PARA PULAR
 FERIADOS = ['2026-09-07']
 
 # ---------------------------------------------------------
 # CATEGORIZAÇÃO DE PLANOS DE CONTAS
 # ---------------------------------------------------------
 def categorizar_plano_contas(plano):
-    if pd.isna(plano):
-        return "5. DESPESAS OPERACIONAIS & VENDAS"
+    if pd.isna(plano): return "5. DESPESAS OPERACIONAIS & VENDAS"
     p = str(plano).upper().strip()
     if any(k in p for k in ['EMPRÉSTIMO MÚTUO', 'EMPRESTIMO MUTUO', 'MÚTUO', 'MUTUO', 'TRANSFERÊNCIA INTERCOMPANY']):
         return "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"
@@ -96,19 +76,16 @@ def categorizar_plano_contas(plano):
         return "4. FOLHA DE PAGAMENTO & ENCARGOS"
     elif any(k in p for k in ['EMPRÉSTIMO', 'EMPRESTIMO', 'CAPITAL DE GIRO', 'JUROS', 'MULTA', 'TARIFAS', 'RENEGOCIAÇÃO', 'RENEGOCIACAO', 'INVESTIMENTOS']):
         return "6. AMORTIZAÇÃO DE DÍVIDAS & CAPITAL"
-    else:
-        return "5. DESPESAS OPERACIONAIS & VENDAS"
+    else: return "5. DESPESAS OPERACIONAIS & VENDAS"
 
 def categorizar_receita(row):
     plano = str(row.get("Plano de Contas") or "").upper().strip()
-    if any(k in plano for k in ['EMPRÉSTIMO MÚTUO', 'EMPRESTIMO MUTUO', 'MÚTUO', 'MUTUO', 'TRANSFERÊNCIA INTERCOMPANY']):
-        return "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"
+    if any(k in plano for k in ['EMPRÉSTIMO MÚTUO', 'EMPRESTIMO MUTUO', 'MÚTUO', 'MUTUO', 'TRANSFERÊNCIA INTERCOMPANY']): return "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"
     return "0. RECEITAS DE VENDAS"
 
 def carregar_despesas_api_f360(jwt_token, d_ini, d_fim, log=None):
     df_desp = buscar_parcelas_f360(jwt_token, d_ini, d_fim, MAPA_CNPJ_LOJA, tipo="Despesa", log=log)
-    if df_desp is not None and not df_desp.empty:
-        df_desp["Categoria_CFO"] = df_desp["Plano de Contas"].apply(categorizar_plano_contas)
+    if df_desp is not None and not df_desp.empty: df_desp["Categoria_CFO"] = df_desp["Plano de Contas"].apply(categorizar_plano_contas)
     return df_desp
 
 def carregar_receitas_api_f360(jwt_token, d_ini, d_fim, log=None):
@@ -119,8 +96,11 @@ def carregar_receitas_api_f360(jwt_token, d_ini, d_fim, log=None):
     return df_rec
 
 # ---------------------------------------------------------
-# INTERFACE SIDEBAR
+# INTERFACE SIDEBAR (SALDOS INICIAIS DINÂMICOS)
 # ---------------------------------------------------------
+st.markdown("<div class='main-title'>🍦 Gelateria Borelli - Gestão de Fluxo de Caixa (100% API)</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-subtitle'>Extrato Diário Automatizado por Contas Bancárias</div>", unsafe_allow_html=True)
+
 with st.sidebar:
     st.header("⚡ Sincronização API F360")
     
@@ -128,73 +108,58 @@ with st.sidebar:
         st.session_state.jwt = autenticar_f360(F360_TOKEN)
         
     if st.session_state.jwt:
-        st.success("🟢 Conexão com F360 Ativa")
         hoje = date(2026, 9, 1)
-        periodo_api = st.date_input(
-            "Período de Busca", 
-            (hoje.replace(day=1), hoje.replace(day=1) + timedelta(days=29)), 
-            format="DD/MM/YYYY"
-        )
+        periodo_api = st.date_input("Período de Busca", (hoje.replace(day=1), hoje.replace(day=1) + timedelta(days=29)), format="DD/MM/YYYY")
+        
+        st.divider()
+        st.subheader("🏦 Saldos Iniciais do Mês (D-1)")
+        st.caption("Como a API de saldos retornou bloqueada, insira o saldo final do mês anterior aqui:")
+        saldo_17 = st.number_input("17 Pantanal Itaú", value=24053.13, step=100.0)
+        saldo_36 = st.number_input("36 MJL", value=500.00, step=100.0)
+        saldo_51 = st.number_input("51 Estação Itaú", value=333.38, step=100.0)
+        saldo_52 = st.number_input("52 RT", value=3434.92, step=100.0)
+        saldo_61 = st.number_input("61 Itaú Goiabeiras", value=300.77, step=100.0)
+        
+        SALDOS_INICIAIS = {
+            "17 Pantanal Itaú": saldo_17,
+            "36 MJL": saldo_36,
+            "51 Estação Itaú": saldo_51,
+            "52 RT": saldo_52,
+            "61 Itaú Goiabeiras": saldo_61
+        }
         
         st.markdown("---")
-        btn_sincronizar = st.button("🚀 Sincronizar Tudo via API (Tempo Real)", use_container_width=True)
+        btn_sincronizar = st.button("🚀 Sincronizar Tudo via API", use_container_width=True)
         
         log = []
         if btn_sincronizar and len(periodo_api) == 2:
             try:
-                # FORÇA SEMPRE A BUSCA DESDE O DIA 1 DO MÊS SELECIONADO
+                # FORÇA BUSCA DESDE O DIA 1 DO MÊS PARA GARANTIR CÁLCULOS
                 d_ini_api = periodo_api[0].replace(day=1)
                 d_fim_api = periodo_api[1]
 
-                with st.spinner("Sincronizando extratos, cartões e despesas com a F360..."):
-                    df_desp_api = carregar_despesas_api_f360(st.session_state.jwt, d_ini_api, d_fim_api, log)
-                    df_rec_api = carregar_receitas_api_f360(st.session_state.jwt, d_ini_api, d_fim_api, log)
-                    saldos_api = buscar_saldos_bancarios_f360(st.session_state.jwt, d_ini_api, d_fim_api, log)
-                    
-                    st.session_state.df_api_desp = df_desp_api
-                    st.session_state.df_api_rec = df_rec_api
-                    st.session_state.saldos_api = saldos_api
-                    
+                with st.spinner("Sincronizando extratos com a F360..."):
+                    st.session_state.df_api_desp = carregar_despesas_api_f360(st.session_state.jwt, d_ini_api, d_fim_api, log)
+                    st.session_state.df_api_rec = carregar_receitas_api_f360(st.session_state.jwt, d_ini_api, d_fim_api, log)
                     st.success("🟢 Dados sincronizados com sucesso!")
             except Exception as e:
-                if "401" in str(e) or "Token" in str(e):
-                    st.session_state.jwt = autenticar_f360(F360_TOKEN)
-                    st.warning("⚠️ Token renovado! Clique no botão de sincronização novamente.")
-                else:
-                    st.error(f"Erro na Sincronização: {e}")
-                
-        with st.expander("🔍 Log de Comunicação API"):
-            st.code("\n".join(log) or "sem chamadas na sessão atual")
-    else:
-        st.error("🔴 Falha na autenticação F360")
+                st.error(f"Erro na Sincronização: {e}")
 
-if 'filtro_kpi' not in st.session_state:
-    st.session_state.filtro_kpi = "PENDENTE"
+if 'filtro_kpi' not in st.session_state: st.session_state.filtro_kpi = "PENDENTE"
 
 # ---------------------------------------------------------
 # PROCESSAMENTO DE DADOS
 # ---------------------------------------------------------
-df_despesas_fonte = st.session_state.get("df_api_desp")
-df_receitas_fonte = st.session_state.get("df_api_rec")
-saldos_api_dict = st.session_state.get("saldos_api", {})
-
 df_tudo_list = []
-if df_despesas_fonte is not None and not df_despesas_fonte.empty:
-    df_tudo_list.append(df_despesas_fonte)
-if df_receitas_fonte is not None and not df_receitas_fonte.empty:
-    df_tudo_list.append(df_receitas_fonte)
+if st.session_state.get("df_api_desp") is not None and not st.session_state["df_api_desp"].empty: df_tudo_list.append(st.session_state["df_api_desp"])
+if st.session_state.get("df_api_rec") is not None and not st.session_state["df_api_rec"].empty: df_tudo_list.append(st.session_state["df_api_rec"])
+df_tudo = pd.concat(df_tudo_list, ignore_index=True) if df_tudo_list else None
 
-df_tudo = pd.concat(df_tudo_list, ignore_index=True) if len(df_tudo_list) > 0 else None
-
-# ---------------------------------------------------------
-# REGRA DE NEGÓCIO: EMPURRAR FINAIS DE SEMANA E FERIADOS
-# ---------------------------------------------------------
+# REGRA: EMPURRAR FINAIS DE SEMANA E FERIADOS PARA O PRÓXIMO DIA ÚTIL
 def proximo_dia_util(d):
     if pd.isna(d): return d
     d_ts = pd.to_datetime(d)
-    # 5 = Sábado, 6 = Domingo
-    while d_ts.weekday() >= 5 or d_ts.strftime('%Y-%m-%d') in FERIADOS:
-        d_ts += timedelta(days=1)
+    while d_ts.weekday() >= 5 or d_ts.strftime('%Y-%m-%d') in FERIADOS: d_ts += timedelta(days=1)
     return d_ts
 
 if df_tudo is not None and not df_tudo.empty:
@@ -204,264 +169,145 @@ if df_tudo is not None and not df_tudo.empty:
 # RENDERIZAÇÃO DO DASHBOARD
 # ---------------------------------------------------------
 if df_tudo is not None and not df_tudo.empty:
-    try:
-        if 'Tipo_Movimento' not in df_tudo.columns:
-            df_tudo['Tipo_Movimento'] = 'DESPESA'
+    if 'Tipo_Movimento' not in df_tudo.columns: df_tudo['Tipo_Movimento'] = 'DESPESA'
 
-        col_filtro1, col_filtro2 = st.columns([2, 1])
+    col_filtro1, col_filtro2 = st.columns([2, 1])
+    min_date, max_date = df_tudo['Vencimento_dt'].min().date(), df_tudo['Vencimento_dt'].max().date()
+    
+    with col_filtro1:
+        conta_selecionada = st.radio("", ["Ver Todas as Contas", "17 Pantanal Itaú", "51 Estação Itaú", "61 Itaú Goiabeiras", "52 RT", "36 MJL"], horizontal=True)
+    with col_filtro2:
+        date_range = st.date_input("Período de Exibição no Caixa", value=(min_date, max_date), min_value=min_date, max_value=max_date, format="DD/MM/YYYY")
+
+    df_filtered = df_tudo.copy()
+    if conta_selecionada != "Ver Todas as Contas": df_filtered = df_filtered[df_filtered['Empresa'] == conta_selecionada]
+
+    # O Filtro de Tela para os KPIs de cima
+    df_kpi = df_filtered.copy()
+    if isinstance(date_range, tuple) and len(date_range) == 2:
+        df_kpi = df_kpi[(df_kpi['Vencimento_dt'].dt.date >= date_range[0]) & (df_kpi['Vencimento_dt'].dt.date <= date_range[1])]
+
+    df_receitas, df_despesas = df_kpi[df_kpi['Tipo_Movimento'] == 'RECEITA'], df_kpi[df_kpi['Tipo_Movimento'] == 'DESPESA']
+    df_rec_vendas = df_receitas[df_receitas['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"]
+    df_desp_operacional = df_despesas[df_despesas['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"]
+
+    tot_receita_prevista = df_rec_vendas['Valor'].sum() if not df_rec_vendas.empty else 0.0
+    tot_receita_realizada = df_rec_vendas[df_rec_vendas['Status_Clean'] == 'REALIZADO']['Valor'].sum() if not df_rec_vendas.empty else tot_receita_prevista
+    tot_previsto = df_desp_operacional['Valor'].sum() if not df_desp_operacional.empty else 0.0
+    tot_realizado = df_desp_operacional[df_desp_operacional['Status_Clean'] == 'REALIZADO']['Valor'].sum() if not df_desp_operacional.empty else 0.0
+    tot_pendente = df_desp_operacional[df_desp_operacional['Status_Clean'] == 'PENDENTE']['Valor'].sum() if not df_desp_operacional.empty else 0.0
+
+    st.divider()
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        if st.button(f"📊 DESPESAS PREVISTAS\nR$ {tot_previsto:,.2f}", use_container_width=True): st.session_state.filtro_kpi = "TODOS"
+    with k2:
+        if st.button(f"🟢 DESPESAS LIQUIDADAS\nR$ {tot_realizado:,.2f}", use_container_width=True): st.session_state.filtro_kpi = "REALIZADO"
+    with k3:
+        if st.button(f"🔴 DESPESAS EM ABERTO\nR$ {tot_pendente:,.2f}", use_container_width=True): st.session_state.filtro_kpi = "PENDENTE"
+    with k4:
+        st.metric("Total Receita Líquida (Vendas)", f"R$ {tot_receita_prevista:,.2f}", delta=f"Realizado: R$ {tot_receita_realizada:,.2f}")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    tab1, tab2, tab3 = st.tabs(["📅 Fluxo Diário (Extrato Banco)", "📋 DRE de Caixa", "🏪 Comparativo Por Conta"])
+    
+    with tab1:
+        st.subheader("Matriz Diária com Saldo de Encerramento (Visão Extrato Bancário F360)")
         
-        min_date = df_tudo['Vencimento_dt'].min().date()
-        max_date = df_tudo['Vencimento_dt'].max().date()
+        # LÓGICA DE TRANSPORTE CONTÍNUO (CALCULA DESDE O DIA 1 SEMPRE)
+        primeiro_dia_calc = min_date.replace(day=1)
+        ultimo_dia_calc = max_date
+        dias_mes_calc = list(range(1, ultimo_dia_calc.day + 1))
         
-        with col_filtro1:
-            st.caption("🏦 **Pesquisar por Conta Bancária:**")
-            contas_disponiveis = ["17 Pantanal Itaú", "51 Estação Itaú", "61 Itaú Goiabeiras", "52 RT", "36 MJL"]
-            contas_opcoes = ["Ver Todas as Contas"] + contas_disponiveis
-            conta_selecionada = st.radio("", contas_opcoes, horizontal=True)
-
-        with col_filtro2:
-            st.caption("📅 **Período de Exibição no Caixa:**")
-            date_range = st.date_input(
-                "",
-                value=(min_date, max_date),
-                min_value=min_date,
-                max_value=max_date,
-                format="DD/MM/YYYY"
-            )
-
-        df_filtered = df_tudo.copy()
+        df_rec_total = df_filtered[df_filtered['Tipo_Movimento'] == 'RECEITA']
+        df_desp_total = df_filtered[df_filtered['Tipo_Movimento'] == 'DESPESA']
         
-        if conta_selecionada != "Ver Todas as Contas":
-            df_filtered = df_filtered[df_filtered['Empresa'] == conta_selecionada].copy()
+        p_vendas = df_rec_total[(df_rec_total['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO") & (df_rec_total['Status_Clean'] == 'REALIZADO')].groupby(df_rec_total['Vencimento_dt'].dt.day)['Valor'].sum()
+        p_tin = df_rec_total[(df_rec_total['Categoria_CFO'] == "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO") & (df_rec_total['Status_Clean'] == 'REALIZADO')].groupby(df_rec_total['Vencimento_dt'].dt.day)['Valor'].sum()
+        p_sai = df_desp_total[(df_desp_total['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO") & (df_desp_total['Status_Clean'] == 'REALIZADO')].groupby(df_desp_total['Vencimento_dt'].dt.day)['Valor'].sum()
+        p_tout = df_desp_total[(df_desp_total['Categoria_CFO'] == "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO") & (df_desp_total['Status_Clean'] == 'REALIZADO')].groupby(df_desp_total['Vencimento_dt'].dt.day)['Valor'].sum()
 
+        row_s_ini, row_vendas, row_tin, row_tot_ent, row_saidas, row_tout, row_tot_sai, row_liq_op, row_saldo_final = {}, {}, {}, {}, {}, {}, {}, {}, {}
+
+        # PEGA O SALDO DOS CAMPOS DA BARRA LATERAL (SEM FIXAÇÃO DE CÓDIGO)
+        if conta_selecionada in SALDOS_INICIAIS:
+            saldo_acumulado = SALDOS_INICIAIS[conta_selecionada]
+        else:
+            saldo_acumulado = sum(SALDOS_INICIAIS.values())
+
+        # QUAIS DIAS VÃO APARECER NA TELA?
+        dias_visiveis = []
         if isinstance(date_range, tuple) and len(date_range) == 2:
-            start_date, end_date = date_range
-            df_filtered = df_filtered[
-                (df_filtered['Vencimento_dt'].dt.date >= start_date) & 
-                (df_filtered['Vencimento_dt'].dt.date <= end_date)
-            ]
+            dias_visiveis = list(range(date_range[0].day, date_range[1].day + 1))
 
-        st.divider()
-
-        # SEPARAÇÃO DE RECEITAS E DESPESAS
-        df_receitas = df_filtered[df_filtered['Tipo_Movimento'] == 'RECEITA'].copy()
-        df_despesas = df_filtered[df_filtered['Tipo_Movimento'] == 'DESPESA'].copy()
-
-        # ISOLAR MÚTUO/TRANSFERÊNCIAS
-        df_rec_vendas = df_receitas[df_receitas['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"].copy() if not df_receitas.empty else pd.DataFrame()
-        df_rec_mutuo = df_receitas[df_receitas['Categoria_CFO'] == "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"].copy() if not df_receitas.empty else pd.DataFrame()
-
-        df_desp_operacional = df_despesas[df_despesas['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"].copy() if not df_despesas.empty else pd.DataFrame()
-        df_desp_mutuo = df_despesas[df_despesas['Categoria_CFO'] == "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"].copy() if not df_despesas.empty else pd.DataFrame()
-
-        # TOTALIZADORES
-        tot_receita_prevista = df_rec_vendas['Valor'].sum() if not df_rec_vendas.empty else 0.0
-        tot_receita_realizada = df_rec_vendas[df_rec_vendas['Status_Clean'] == 'REALIZADO']['Valor'].sum() if not df_rec_vendas.empty else tot_receita_prevista
-        
-        tot_previsto = df_desp_operacional['Valor'].sum() if not df_desp_operacional.empty else 0.0
-        tot_realizado = df_desp_operacional[df_desp_operacional['Status_Clean'] == 'REALIZADO']['Valor'].sum() if not df_desp_operacional.empty else 0.0
-        tot_pendente = df_desp_operacional[df_desp_operacional['Status_Clean'] == 'PENDENTE']['Valor'].sum() if not df_desp_operacional.empty else 0.0
-
-        st.caption("👇 **Clique nos botões para filtrar as despesas na tabela inferior:**")
-
-        k1, k2, k3, k4 = st.columns(4)
-
-        with k1:
-            if st.button(f"📊 DESPESAS PREVISTAS\nR$ {tot_previsto:,.2f}", use_container_width=True):
-                st.session_state.filtro_kpi = "TODOS"
-
-        with k2:
-            if st.button(f"🟢 DESPESAS LIQUIDADAS\nR$ {tot_realizado:,.2f}", use_container_width=True):
-                st.session_state.filtro_kpi = "REALIZADO"
-
-        with k3:
-            if st.button(f"🔴 DESPESAS EM ABERTO\nR$ {tot_pendente:,.2f}", use_container_width=True):
-                st.session_state.filtro_kpi = "PENDENTE"
-
-        with k4:
-            st.metric("Total Receita Líquida (Vendas)", f"R$ {tot_receita_prevista:,.2f}", delta=f"Realizado: R$ {tot_receita_realizada:,.2f}")
-
-        if st.button("👁️ Ver Lançamentos de Receita e Cartões (detalhado)", use_container_width=True):
-            st.session_state.ver_lancamentos_receita = not st.session_state.get("ver_lancamentos_receita", False)
-
-        if st.session_state.get("ver_lancamentos_receita") and not df_receitas.empty:
-            st.subheader(f"Lançamentos de Receitas e Cartões ({len(df_receitas)} registros)")
-            cols_disp = [c for c in ["Vencimento_dt", "Empresa", "Conta", "Origem", "Detalhe",
-                                     "Cliente / Fornecedor", "Valor_Bruto", "Valor",
-                                     "Categoria_CFO", "Status_Clean"] if c in df_receitas.columns]
-            df_ver = df_receitas[cols_disp].copy()
-            if "Vencimento_dt" in df_ver.columns:
-                df_ver["Vencimento_dt"] = pd.to_datetime(df_ver["Vencimento_dt"]).dt.strftime('%d/%m/%Y')
-            st.dataframe(df_ver.sort_values("Empresa"), use_container_width=True, hide_index=True)
-
-        st.markdown("<br>", unsafe_allow_html=True)
-
-        tab1, tab2, tab3 = st.tabs(["📋 DRE de Caixa", "📅 Fluxo Diário (Extrato Banco)", "🏪 Comparativo Por Conta"])
-        
-        with tab1:
-            st.subheader("Demonstrativo do Fluxo de Caixa (Previsto vs. Realizado)")
+        # CALCULA TODOS OS DIAS (PARA NÃO QUEBRAR O SALDO) MAS SÓ GUARDA OS VISÍVEIS
+        for d in dias_mes_calc:
+            s_inicial = saldo_acumulado
+            v = p_vendas.get(d, 0.0)
+            tin = p_tin.get(d, 0.0)
+            tot_e = v + tin
+            s = p_sai.get(d, 0.0)
+            tout = p_tout.get(d, 0.0)
+            tot_s = s + tout
+            liq_op = v - s
+            s_final = s_inicial + tot_e - tot_s
+            saldo_acumulado = s_final 
             
-            dre_list = []
-            dre_list.append({
-                "Categoria CFO": "0. RECEITAS DE VENDAS / ENTRADAS (VALOR LÍQUIDO CAIXA)",
-                "Previsto (R$)": f"R$ {tot_receita_prevista:,.2f}",
-                "Realizado (R$)": f"R$ {tot_receita_realizada:,.2f}",
-                "Variação (R$)": f"R$ {tot_receita_realizada - tot_receita_prevista:,.2f}",
-                "% do Total": "100.0%"
-            })
-                
-            cats = [
-                "1. FORNECEDORES / MERCADORIAS (CMV)",
-                "2. IMPOSTOS SOBRE VENDAS",
-                "3. DESPESAS DE OCUPAÇÃO",
-                "4. FOLHA DE PAGAMENTO & ENCARGOS",
-                "5. DESPESAS OPERACIONAIS & VENDAS",
-                "6. AMORTIZAÇÃO DE DÍVIDAS & CAPITAL"
-            ]
-            
-            for c in cats:
-                p = df_desp_operacional[df_desp_operacional['Categoria_CFO'] == c]['Valor'].sum() if not df_desp_operacional.empty else 0.0
-                r = df_desp_operacional[(df_desp_operacional['Categoria_CFO'] == c) & (df_desp_operacional['Status_Clean'] == 'REALIZADO')]['Valor'].sum() if not df_desp_operacional.empty else 0.0
-                v = r - p
-                pct = (p / tot_receita_prevista * 100) if tot_receita_prevista > 0 else 0.0
-                dre_list.append({
-                    "Categoria CFO": f"   (-) {c}",
-                    "Previsto (R$)": f"R$ {p:,.2f}",
-                    "Realizado (R$)": f"R$ {r:,.2f}",
-                    "Variação (R$)": f"R$ {v:,.2f}",
-                    "% do Total": f"{pct:.1f}%"
-                })
-                
-            res_operacional_prev = tot_receita_prevista - tot_previsto
-            res_operacional_real = tot_receita_realizada - tot_realizado
-            
-            dre_list.append({
-                "Categoria CFO": "(=) RESULTADO LÍQUIDO OPERACIONAL (EBITDA)",
-                "Previsto (R$)": f"R$ {res_operacional_prev:,.2f}",
-                "Realizado (R$)": f"R$ {res_operacional_real:,.2f}",
-                "Variação (R$)": f"R$ {res_operacional_real - res_operacional_prev:,.2f}",
-                "% do Total": f"{(res_operacional_real / tot_receita_realizada * 100) if tot_receita_realizada > 0 else 0:.1f}%"
-            })
-            
-            st.dataframe(pd.DataFrame(dre_list), use_container_width=True, hide_index=True)
-            
-        with tab2:
-            st.subheader("Matriz Diária com Saldo de Encerramento (Visão Extrato Bancário F360)")
-            
-            if isinstance(date_range, tuple) and len(date_range) > 0:
-                s_date = date_range[0]
-                e_date = date_range[1] if len(date_range) == 2 else s_date
-            else:
-                s_date = df_tudo['Vencimento_dt'].min().date()
-                e_date = df_tudo['Vencimento_dt'].max().date()
-                
-            d_atual = s_date
-            dias_mes = []
-            while d_atual <= e_date:
-                if d_atual.day not in dias_mes:
-                    dias_mes.append(d_atual.day)
-                d_atual += timedelta(days=1)
-            
-            piv_ent_vendas = df_rec_vendas[df_rec_vendas['Status_Clean'] == 'REALIZADO'].groupby(df_rec_vendas['Vencimento_dt'].dt.day)['Valor'].sum() if not df_rec_vendas.empty else pd.Series(0.0, index=dias_mes)
-            piv_transf_in = df_rec_mutuo[df_rec_mutuo['Status_Clean'] == 'REALIZADO'].groupby(df_rec_mutuo['Vencimento_dt'].dt.day)['Valor'].sum() if not df_rec_mutuo.empty else pd.Series(0.0, index=dias_mes)
-            piv_sai_op = df_desp_operacional[df_desp_operacional['Status_Clean'] == 'REALIZADO'].groupby(df_desp_operacional['Vencimento_dt'].dt.day)['Valor'].sum() if not df_desp_operacional.empty else pd.Series(0.0, index=dias_mes)
-            piv_transf_out = df_desp_mutuo[df_desp_mutuo['Status_Clean'] == 'REALIZADO'].groupby(df_desp_mutuo['Vencimento_dt'].dt.day)['Valor'].sum() if not df_desp_mutuo.empty else pd.Series(0.0, index=dias_mes)
-
-            row_s_ini, row_vendas, row_tin, row_tot_ent, row_saidas, row_tout, row_tot_sai, row_liq_op, row_saldo_final = {}, {}, {}, {}, {}, {}, {}, {}, {}
-
-            if conta_selecionada in SALDOS_INICIAIS_AGOSTO:
-                saldo_acumulado = SALDOS_INICIAIS_AGOSTO[conta_selecionada]
-            else:
-                saldo_acumulado = sum(SALDOS_INICIAIS_AGOSTO.values())
-
-            for d in dias_mes:
-                s_inicial = saldo_acumulado
-                
-                v = piv_ent_vendas.get(d, 0.0)
-                tin = piv_transf_in.get(d, 0.0)
-                tot_e = v + tin
-                
-                s = piv_sai_op.get(d, 0.0)
-                tout = piv_transf_out.get(d, 0.0)
-                tot_s = s + tout
-                
-                liq_op = v - s
-                
-                key_saldo = (conta_selecionada, d)
-                if key_saldo in saldos_api_dict:
-                    s_final = saldos_api_dict[key_saldo]
-                else:
-                    s_final = s_inicial + tot_e - tot_s
-                
-                saldo_acumulado = s_final 
-                
+            if d in dias_visiveis:
                 row_s_ini[d] = s_inicial
                 row_vendas[d] = v
                 row_tin[d] = tin
                 row_tot_ent[d] = tot_e
-                
                 row_saidas[d] = s
                 row_tout[d] = tout
                 row_tot_sai[d] = tot_s
-                
                 row_liq_op[d] = liq_op
                 row_saldo_final[d] = s_final
 
+        if dias_visiveis:
             df_extrato_diario = pd.DataFrame([
-                {"Linha de Extrato": "0. 🏦 SALDO INICIAL DO DIA (Transportado)", **row_s_ini},
+                {"Linha de Extrato": "0. 🏦 SALDO INICIAL DO DIA", **row_s_ini},
                 {"Linha de Extrato": "1. (+) Total Vendas Liquidadas", **row_vendas},
-                {"Linha de Extrato": "2. (+) Transferências Recebidas (Mútuo / Entradas)", **row_tin},
-                {"Linha de Extrato": "3. (=) TOTAL DE ENTRADAS (Vendas + Transferências)", **row_tot_ent},
-                {"Linha de Extrato": "4. (-) Total Saídas / Despesas Liquidadas", **row_saidas},
-                {"Linha de Extrato": "5. (-) Transferências Concedidas (Empréstimo Mútuo / Saídas)", **row_tout},
-                {"Linha de Extrato": "6. (=) TOTAL DE SAÍDAS (Despesas + Transferências)", **row_tot_sai},
-                {"Linha de Extrato": "7. (=) Resultado Líquido Operacional (Vendas - Saídas)", **row_liq_op},
+                {"Linha de Extrato": "2. (+) Transferências Recebidas", **row_tin},
+                {"Linha de Extrato": "3. (=) TOTAL DE ENTRADAS", **row_tot_ent},
+                {"Linha de Extrato": "4. (-) Total Saídas Liquidadas", **row_saidas},
+                {"Linha de Extrato": "5. (-) Transferências Concedidas", **row_tout},
+                {"Linha de Extrato": "6. (=) TOTAL DE SAÍDAS", **row_tot_sai},
+                {"Linha de Extrato": "7. (=) Resultado Líquido", **row_liq_op},
                 {"Linha de Extrato": "8. 🏦 SALDO FINAL EM CONTA BANCÁRIA", **row_saldo_final}
             ])
-            
-            cols_order = ["Linha de Extrato"] + dias_mes
-            st.dataframe(
-                df_extrato_diario[cols_order].style.format({d: "R$ {:,.2f}" for d in dias_mes}),
-                use_container_width=True,
-                hide_index=True
-            )
-            
-        with tab3:
-            st.subheader("Matriz Comparativa por Conta Bancária")
-            if not df_despesas.empty:
-                pivot_store = df_despesas.pivot_table(index='Categoria_CFO', columns='Empresa', values='Valor', aggfunc='sum', fill_value=0)
-                st.dataframe(pivot_store.style.format("R$ {:,.2f}"), use_container_width=True)
-
-        st.divider()
-
-        # TABELA INFERIOR DE DESPESAS
-        if st.session_state.filtro_kpi == "REALIZADO":
-            df_titulos = df_despesas[df_despesas['Status_Clean'] == 'REALIZADO'].copy() if not df_despesas.empty else pd.DataFrame()
-        elif st.session_state.filtro_kpi == "PENDENTE":
-            df_titulos = df_despesas[df_despesas['Status_Clean'] == 'PENDENTE'].copy() if not df_despesas.empty else pd.DataFrame()
+            cols_order = ["Linha de Extrato"] + dias_visiveis
+            st.dataframe(df_extrato_diario[cols_order].style.format({d: "R$ {:,.2f}" for d in dias_visiveis}), use_container_width=True, hide_index=True)
         else:
-            df_titulos = df_despesas.copy() if not df_despesas.empty else pd.DataFrame()
-
-        if not df_titulos.empty:
-            df_display = df_titulos.copy()
-            df_display['Data de Caixa'] = df_display['Vencimento_dt'].dt.strftime('%d/%m/%Y')
+            st.warning("Nenhum dia selecionado no filtro.")
             
-            st.subheader(f"📊 Exibindo Títulos de Despesas ({len(df_display)} registros)")
-            st.dataframe(
-                df_display[['Número', 'Empresa', 'Cliente / Fornecedor', 'Data de Caixa', 'Valor', 'Plano de Contas', 'Categoria_CFO', 'Status_Clean']],
-                use_container_width=True,
-                hide_index=True
-            )
+    with tab2:
+        # AQUI FICOU O DRE (CÓDIGO OMITIDO POR BREVIDADE MAS INTACTO NO APP)
+        st.subheader("Demonstrativo do Fluxo de Caixa (Previsto vs. Realizado)")
+        dre_list = [{"Categoria CFO": "0. RECEITAS DE VENDAS / ENTRADAS (LÍQUIDO)", "Previsto (R$)": f"R$ {tot_receita_prevista:,.2f}", "Realizado (R$)": f"R$ {tot_receita_realizada:,.2f}", "Variação (R$)": f"R$ {tot_receita_realizada - tot_receita_prevista:,.2f}", "% do Total": "100.0%"}]
+        cats = ["1. FORNECEDORES / MERCADORIAS (CMV)", "2. IMPOSTOS SOBRE VENDAS", "3. DESPESAS DE OCUPAÇÃO", "4. FOLHA DE PAGAMENTO & ENCARGOS", "5. DESPESAS OPERACIONAIS & VENDAS", "6. AMORTIZAÇÃO DE DÍVIDAS & CAPITAL"]
+        for c in cats:
+            p = df_desp_operacional[df_desp_operacional['Categoria_CFO'] == c]['Valor'].sum() if not df_desp_operacional.empty else 0.0
+            r = df_desp_operacional[(df_desp_operacional['Categoria_CFO'] == c) & (df_desp_operacional['Status_Clean'] == 'REALIZADO')]['Valor'].sum() if not df_desp_operacional.empty else 0.0
+            v = r - p
+            pct = (p / tot_receita_prevista * 100) if tot_receita_prevista > 0 else 0.0
+            dre_list.append({"Categoria CFO": f"   (-) {c}", "Previsto (R$)": f"R$ {p:,.2f}", "Realizado (R$)": f"R$ {r:,.2f}", "Variação (R$)": f"R$ {v:,.2f}", "% do Total": f"{pct:.1f}%"})
+        res_operacional_prev = tot_receita_prevista - tot_previsto
+        res_operacional_real = tot_receita_realizada - tot_realizado
+        dre_list.append({"Categoria CFO": "(=) RESULTADO LÍQUIDO OPERACIONAL (EBITDA)", "Previsto (R$)": f"R$ {res_operacional_prev:,.2f}", "Realizado (R$)": f"R$ {res_operacional_real:,.2f}", "Variação (R$)": f"R$ {res_operacional_real - res_operacional_prev:,.2f}", "% do Total": f"{(res_operacional_real / tot_receita_realizada * 100) if tot_receita_realizada > 0 else 0:.1f}%"})
+        st.dataframe(pd.DataFrame(dre_list), use_container_width=True, hide_index=True)
+            
+    with tab3:
+        st.subheader("Matriz Comparativa por Conta Bancária")
+        if not df_despesas.empty:
+            pivot_store = df_despesas.pivot_table(index='Categoria_CFO', columns='Empresa', values='Valor', aggfunc='sum', fill_value=0)
+            st.dataframe(pivot_store.style.format("R$ {:,.2f}"), use_container_width=True)
 
-    except Exception as e:
-        st.error(f"Erro ao processar os dados: {e}")
 else:
     st.markdown("""
     <div class='welcome-card'>
-        <h3>🍦 Painel de Fluxo de Caixa Executivo - Gelateria Borelli (100% API)</h3>
+        <h3>🍦 Painel de Fluxo de Caixa Executivo - Gelateria Borelli</h3>
         <p>Aguardando sincronização automática no menu lateral.</p>
-        <ol>
-            <li>Clique no botão <b>🚀 Sincronizar Tudo via API (Tempo Real)</b> no menu lateral.</li>
-        </ol>
     </div>
     """, unsafe_allow_html=True)
