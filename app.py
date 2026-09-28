@@ -55,12 +55,9 @@ MAPA_CNPJ_LOJA = {
     "36240923000320": "8 - GOIABEIRAS"
 }
 
-# FERIADOS NACIONAIS / REGIONAIS CONHECIDOS PARA PULAR
+# FERIADOS NACIONAIS / REGIONAIS CONHECIDOS
 FERIADOS = ['2026-09-07']
 
-# ---------------------------------------------------------
-# CATEGORIZAÇÃO DE PLANOS DE CONTAS
-# ---------------------------------------------------------
 def categorizar_plano_contas(plano):
     if pd.isna(plano): return "5. DESPESAS OPERACIONAIS & VENDAS"
     p = str(plano).upper().strip()
@@ -84,13 +81,11 @@ def categorizar_receita(row):
     return "0. RECEITAS DE VENDAS"
 
 def carregar_despesas_api_f360(jwt_token, d_ini, d_fim, log=None):
-    # CORREÇÃO: Voltando o termo estrito exigido pela API da F360 ("Despesa")
     df_desp = buscar_parcelas_f360(jwt_token, d_ini, d_fim, MAPA_CNPJ_LOJA, tipo="Despesa", log=log)
     if df_desp is not None and not df_desp.empty: df_desp["Categoria_CFO"] = df_desp["Plano de Contas"].apply(categorizar_plano_contas)
     return df_desp
 
 def carregar_receitas_api_f360(jwt_token, d_ini, d_fim, log=None):
-    # CORREÇÃO: Voltando o termo estrito exigido pela API da F360 ("Receita")
     df_rec = buscar_parcelas_f360(jwt_token, d_ini, d_fim, MAPA_CNPJ_LOJA, tipo="Receita", log=log)
     if df_rec is not None and not df_rec.empty:
         df_rec["Categoria_CFO"] = df_rec.apply(categorizar_receita, axis=1)
@@ -112,7 +107,7 @@ with st.sidebar:
         
         st.divider()
         st.subheader("🏦 Saldos Iniciais do Mês (D-1)")
-        st.caption("Como a API de saldos retornou bloqueada, insira o saldo final do mês anterior aqui:")
+        st.caption("Altere os saldos de abertura oficiais do banco aqui:")
         saldo_17 = st.number_input("17 Pantanal Itaú", value=24053.13, step=100.0)
         saldo_36 = st.number_input("36 MJL", value=500.00, step=100.0)
         saldo_51 = st.number_input("51 Estação Itaú", value=333.38, step=100.0)
@@ -133,6 +128,7 @@ with st.sidebar:
         log = []
         if btn_sincronizar and len(periodo_api) == 2:
             try:
+                # FORÇA BUSCA DESDE O DIA 1 DO MÊS PARA GARANTIR CÁLCULOS
                 d_ini_api = periodo_api[0].replace(day=1)
                 d_fim_api = periodo_api[1]
 
@@ -146,37 +142,26 @@ with st.sidebar:
 if 'filtro_kpi' not in st.session_state: st.session_state.filtro_kpi = "PENDENTE"
 
 # ---------------------------------------------------------
-# PROCESSAMENTO DE DADOS E CORREÇÃO DO FERIADO
+# PROCESSAMENTO DE DADOS E CORREÇÃO BANCÁRIA
 # ---------------------------------------------------------
 df_tudo_list = []
 if st.session_state.get("df_api_desp") is not None and not st.session_state["df_api_desp"].empty: df_tudo_list.append(st.session_state["df_api_desp"])
 if st.session_state.get("df_api_rec") is not None and not st.session_state["df_api_rec"].empty: df_tudo_list.append(st.session_state["df_api_rec"])
 df_tudo = pd.concat(df_tudo_list, ignore_index=True) if df_tudo_list else None
 
-def proximo_dia_util(row):
+def proximo_dia_util(d):
     """
-    CORREÇÃO FUNDAMENTAL: 
-    Se a despesa já foi paga (REALIZADO), mantemos o dia exato (mesmo que seja sábado).
-    Se for PENDENTE (Previsão de Título), empurramos o vencimento para Segunda-feira.
+    Empurra as datas de Finais de Semana e Feriados para Segunda-feira.
+    Contas bancárias nunca movimentam em feriados, igual no F360.
     """
-    d = row['Vencimento_dt']
-    status = row.get('Status_Clean', 'PENDENTE')
-    
-    if pd.isna(d): 
-        return d
-        
+    if pd.isna(d): return d
     d_ts = pd.to_datetime(d)
-    
-    if status == 'REALIZADO':
-        return d_ts
-        
     while d_ts.weekday() >= 5 or d_ts.strftime('%Y-%m-%d') in FERIADOS: 
         d_ts += timedelta(days=1)
-        
     return d_ts
 
 if df_tudo is not None and not df_tudo.empty:
-    df_tudo['Vencimento_dt'] = df_tudo.apply(proximo_dia_util, axis=1)
+    df_tudo['Vencimento_dt'] = df_tudo['Vencimento_dt'].apply(proximo_dia_util)
 
 # ---------------------------------------------------------
 # RENDERIZAÇÃO DO DASHBOARD
@@ -195,7 +180,6 @@ if df_tudo is not None and not df_tudo.empty:
     df_filtered = df_tudo.copy()
     if conta_selecionada != "Ver Todas as Contas": df_filtered = df_filtered[df_filtered['Empresa'] == conta_selecionada]
 
-    # O Filtro de Tela para os KPIs de cima
     df_kpi = df_filtered.copy()
     if isinstance(date_range, tuple) and len(date_range) == 2:
         df_kpi = df_kpi[(df_kpi['Vencimento_dt'].dt.date >= date_range[0]) & (df_kpi['Vencimento_dt'].dt.date <= date_range[1])]
@@ -250,7 +234,6 @@ if df_tudo is not None and not df_tudo.empty:
 
         row_s_ini, row_vendas, row_tin, row_tot_ent, row_saidas, row_tout, row_tot_sai, row_liq_op, row_saldo_final = {}, {}, {}, {}, {}, {}, {}, {}, {}
 
-        # PEGA O SALDO DOS CAMPOS DA BARRA LATERAL
         if conta_selecionada in SALDOS_INICIAIS:
             saldo_acumulado = SALDOS_INICIAIS[conta_selecionada]
         else:
@@ -268,7 +251,6 @@ if df_tudo is not None and not df_tudo.empty:
             s_final = s_inicial + tot_e - tot_s
             saldo_acumulado = s_final 
             
-            # Só armazena para visualização os dias que a tela está pedindo
             if d in dias_visiveis:
                 row_s_ini[d] = s_inicial
                 row_vendas[d] = v

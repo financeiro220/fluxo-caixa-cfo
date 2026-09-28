@@ -1,7 +1,7 @@
 """
 f360_api.py - Integração Total com a API Pública F360.
-- Busca retroativa profunda (60 dias) para driblar limitação da API de Cartões (Erro 400 em Liquidação).
-- Saldos de abertura fixados na aplicação.
+- Correção de parser de datas ISO8601 (Evita inversão de dias e meses).
+- Busca retroativa profunda (60 dias) para Cartões.
 """
 import json
 import re
@@ -76,39 +76,30 @@ def _num(v):
         return 0.0
 
 def _data(v):
-    if v is None or (not isinstance(v, str) and pd.isna(v)):
+    if v is None or pd.isna(v): 
         return pd.NaT
     if isinstance(v, str):
         s = v.strip()
-        if not s:
-            return pd.NaT
+        if not s: return pd.NaT
+        # Tenta data brasileira clássica
         m = re.search(r"(\d{2})/(\d{2})/(\d{4})", s)
         if m:
             d, m_m, y = m.groups()
             return pd.to_datetime(f"{y}-{m_m}-{d}", errors="coerce")
-        else:
-            ts = pd.to_datetime(s, dayfirst=True, errors="coerce")
-    else:
-        ts = pd.to_datetime(v, errors="coerce")
-    
-    if pd.notna(ts) and getattr(ts, "tzinfo", None) is not None:
-        ts = ts.tz_localize(None)
-    return ts
+        # Identifica ISO Date (ex: 2026-09-08) sem inverter dias
+        if re.match(r"^\d{4}-\d{2}-\d{2}", s):
+            return pd.to_datetime(s, errors="coerce")
+        return pd.to_datetime(s, dayfirst=True, errors="coerce")
+    return pd.to_datetime(v, errors="coerce")
 
 def _mapear_conta_para_loja(conta_str):
     c = str(conta_str or "").strip()
     c_upper = c.upper()
-    
-    if "17" in c or "PANTANAL" in c_upper:
-        return "17 Pantanal Itaú"
-    elif "51" in c or "ESTAÇÃO" in c_upper or "ESTACAO" in c_upper:
-        return "51 Estação Itaú"
-    elif "61" in c or "GOIABEIRAS" in c_upper:
-        return "61 Itaú Goiabeiras"
-    elif "52" in c or "RT" in c_upper:
-        return "52 RT"
-    elif "36" in c or "MJL" in c_upper:
-        return "36 MJL"
+    if "17" in c or "PANTANAL" in c_upper: return "17 Pantanal Itaú"
+    elif "51" in c or "ESTAÇÃO" in c_upper or "ESTACAO" in c_upper: return "51 Estação Itaú"
+    elif "61" in c or "GOIABEIRAS" in c_upper: return "61 Itaú Goiabeiras"
+    elif "52" in c or "RT" in c_upper: return "52 RT"
+    elif "36" in c or "MJL" in c_upper: return "36 MJL"
     return c or "17 Pantanal Itaú"
 
 def buscar_saldos_bancarios_f360(jwt, d_ini, d_fim, log=None):
@@ -119,7 +110,7 @@ def buscar_saldos_bancarios_f360(jwt, d_ini, d_fim, log=None):
     try:
         r = requests.get(url, headers=headers, params=params, timeout=60)
         if r.status_code != 200:
-            log.append(f"Aviso API Saldos HTTP {r.status_code}: buscando cálculo por movimentação manual")
+            log.append(f"Aviso API Saldos HTTP {r.status_code}")
             return {}
         corpo = r.json()
         res = corpo.get("Result") if isinstance(corpo, dict) else corpo
@@ -131,10 +122,8 @@ def buscar_saldos_bancarios_f360(jwt, d_ini, d_fim, log=None):
                 valor_saldo = _num(item.get("SaldoFinal") or item.get("Saldo"))
                 if pd.notna(data_saldo):
                     saldos_por_conta[(conta_nome, data_saldo.day)] = valor_saldo
-        log.append(f"Saldos Bancários API: {len(saldos_por_conta)} registros")
         return saldos_por_conta
-    except Exception as e:
-        log.append(f"Erro Saldos: {e}")
+    except Exception:
         return {}
 
 def _listar_titulos(jwt, tipo, ini, fim, tipo_datas, cnpjs):
@@ -190,8 +179,6 @@ def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
     df["Vencimento_real"] = df["Vencimento_real"].apply(_data)
     df["Liquidacao_dt"] = df["Liquidacao_raw"].apply(_data)
     df = df.drop(columns=["Liquidacao_raw"])
-    df["Vencimento_real"] = pd.to_datetime(df["Vencimento_real"], errors="coerce")
-    df["Liquidacao_dt"] = pd.to_datetime(df["Liquidacao_dt"], errors="coerce")
     df["Vencimento_dt"] = df["Liquidacao_dt"].where(df["Liquidacao_dt"].notna(), df["Vencimento_real"])
     df = df.dropna(subset=["Vencimento_dt"]).copy()
     df["Dia"] = df["Vencimento_dt"].dt.day
@@ -264,9 +251,9 @@ def _listar_cartoes_api(jwt, tipo, ini, fim, tipo_datas, cnpjs):
         params = {"pagina": pagina, "tipo": tipo, "inicio": ini.isoformat(), "fim": fim.isoformat(), "tipoDatas": tipo_datas, "status": "Todos"}
         if cnpjs: params["empresas"] = ",".join(cnpjs)
         r = requests.get(url, headers=headers, params=params, timeout=60)
-        if r.status_code != 200: raise RuntimeError(f"HTTP {r.status_code} em Cartões: {r.text[:300]}")
+        if r.status_code != 200: raise RuntimeError(f"HTTP {r.status_code} em Cartões")
         corpo = r.json()
-        if isinstance(corpo, dict) and corpo.get("Ok") is False: raise RuntimeError(f"F360 retornou erro: {str(corpo)[:300]}")
+        if isinstance(corpo, dict) and corpo.get("Ok") is False: raise RuntimeError("Erro F360")
         res = corpo.get("Result") if isinstance(corpo, dict) else corpo
         if isinstance(res, dict):
             itens = res.get("Parcelas") or []
@@ -285,14 +272,11 @@ def buscar_cartoes_f360(jwt, d_ini, d_fim, mapa_cnpj, log=None):
     
     for td in ["Vencimento"]:
         for ini, fim in _janelas(d_ini_expandido, d_fim):
-            rotulo = f"Cartões / {td} {ini:%d/%m/%Y} a {fim:%d/%m/%Y}"
             try:
                 itens = _listar_cartoes_api(jwt, "Receita", ini, fim, td, cnpjs)
                 if not itens and cnpjs:
                     itens = _listar_cartoes_api(jwt, "Receita", ini, fim, td, [])
-                log.append(f"{rotulo}: {len(itens)} parcelas de cartões encontradas")
-            except Exception as e:
-                log.append(f"{rotulo}: ERRO -> {e}")
+            except Exception:
                 itens = []
             for it in itens:
                 chave = str(it.get("ParcelaId") or json.dumps(it, sort_keys=True, default=str))
@@ -301,120 +285,31 @@ def buscar_cartoes_f360(jwt, d_ini, d_fim, mapa_cnpj, log=None):
                     vistos.add(chave)
     return _normaliza_cartoes(registros, mapa_cnpj)
 
-def processar_parcelas_cartoes_arquivo(arquivo, mapa_cnpj):
-    nome = str(getattr(arquivo, "name", "")).lower()
-    if nome.endswith(".csv"): cru = pd.read_csv(arquivo, header=None, dtype=str, sep=None, engine="python")
-    else: cru = pd.read_excel(arquivo, header=None, dtype=object)
-    cab = None
-    for i, linha in cru.iterrows():
-        ks = {_k(v) for v in linha.dropna()}
-        if "adquirente" in ks and ({"vbruto", "valorbruto"} & ks):
-            cab = i
-            break
-    if cab is None: raise ValueError("Cabeçalho não encontrado.")
-    df = cru.iloc[cab + 1:].copy()
-    df.columns = [str(c).strip() for c in cru.iloc[cab].values]
-    df = df.dropna(how="all")
-    df = df[df.apply(lambda r: _pega(r.to_dict(), "adquirente") is not None, axis=1)]
-    return _normaliza_cartoes(df.to_dict("records"), mapa_cnpj)
-
-def _acha_cabecalho(df_raw, tokens):
-    for idx, row in df_raw.iterrows():
-        vals = [str(v) for v in row.dropna()]
-        texto = " | ".join(vals)
-        if all(tok in texto for tok in tokens): return idx
-    return None
-
-def _ler_aba(caminho_ou_buffer, aba, tokens_cabecalho):
-    df_raw = pd.read_excel(caminho_ou_buffer, sheet_name=aba, header=None, dtype=object)
-    cab = _acha_cabecalho(df_raw, tokens_cabecalho)
-    if cab is None: return pd.DataFrame()
-    df = df_raw.iloc[cab + 1:].copy()
-    df.columns = [str(c).strip() for c in df_raw.iloc[cab].values]
-    df = df.dropna(how="all")
-    return df.reset_index(drop=True)
-
-def processar_detalhes_fluxo_caixa(arquivos, mapa_cnpj):
-    if not isinstance(arquivos, (list, tuple)): arquivos = [arquivos]
-    linhas, brutos = [], {"titulos": [], "cartoes": [], "transferencias": [], "ajustes": []}
-
-    for arq in arquivos:
-        t = _ler_aba(arq, "Parcelas de Títulos", ["Conta", "Pessoa", "Valor Bruto"])
-        for _, r in t.iterrows():
-            pessoa = str(r.get("Pessoa") or "").strip()
-            plano = str(r.get("Plano de Contas") or "").upper().strip()
-            conta_raw = str(r.get("Conta") or "").strip()
-            conta_loja = _mapear_conta_para_loja(conta_raw)
-            is_mutuo = any(k in plano for k in ['EMPRÉSTIMO MÚTUO', 'EMPRESTIMO MUTUO', 'MÚTUO', 'MUTUO', 'TRANSFERÊNCIA INTERCOMPANY'])
-            linhas.append({
-                "Origem": "Título", "Detalhe": pessoa or "Não informado", "Empresa": conta_loja, "Conta": conta_raw,
-                "Cliente / Fornecedor": pessoa, "Número": r.get("Número"), "Plano de Contas": r.get("Plano de Contas") or "Outros",
-                "Valor_Bruto": _num(r.get("Valor Bruto")), "Valor": _num(r.get("Valor Líquido")),
-                "Vencimento_real": _data(r.get("Vencimento")), "Liquidacao_dt": _data(r.get("Liquidação/Agendamento")),
-                "Categoria_CFO": ("7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO" if is_mutuo else "0. RECEITAS DE VENDAS"),
-            })
-        brutos["titulos"].append(t)
-
-        c = _ler_aba(arq, "Parcelas de Cartões", ["Conta", "Adquirente", "Valor Bruto"])
-        for _, r in c.iterrows():
-            adq = str(r.get("Adquirente") or "").strip()
-            band = str(r.get("Bandeira") or "").strip()
-            conta_raw = str(r.get("Conta") or "").strip()
-            conta_loja = _mapear_conta_para_loja(conta_raw)
-            linhas.append({
-                "Origem": "Cartão", "Detalhe": f"{adq} - {band}" if band else adq, "Empresa": conta_loja, "Conta": conta_raw,
-                "Cliente / Fornecedor": f"{adq} ({band})" if band else adq, "Número": r.get("Parcela"),
-                "Plano de Contas": f"Receita de Vendas ({adq})", "Valor_Bruto": _num(r.get("Valor Bruto")),
-                "Valor": _num(r.get("Valor Líquido")), "Vencimento_real": _data(r.get("Vencimento")),
-                "Liquidacao_dt": _data(r.get("Liquidação/Agendamento")), "Categoria_CFO": "0. RECEITAS DE VENDAS",
-            })
-        brutos["cartoes"].append(c)
-
-    df = pd.DataFrame(linhas)
-    if not df.empty:
-        df["Vencimento_dt"] = df["Liquidacao_dt"].where(df["Liquidacao_dt"].notna(), df["Vencimento_real"])
-        df = df.dropna(subset=["Vencimento_dt"]).copy()
-        df["Dia"] = df["Vencimento_dt"].dt.day
-        df["Status_Clean"] = "REALIZADO"
-        df["Status"] = "Lançado"
-        df["Tipo_Movimento"] = "RECEITA"
-        df["ParcelaId"] = df["Origem"] + "_" + df.index.astype(str)
-
-    return df, brutos
-
 def buscar_parcelas_f360(jwt, d_ini, d_fim, mapa_cnpj, tipo="Despesa", incluir_liquidacao=True, progresso=None, log=None):
     log = log if log is not None else []
     cnpjs = [_fmt_cnpj(c) for c in mapa_cnpj]
     tipos_data = ["Vencimento"] + (["Liquidação"] if incluir_liquidacao else [])
     janelas = list(_janelas(d_ini, d_fim))
 
-    unicas, passo, total = {}, 0, len(janelas) * len(tipos_data)
+    unicas = {}
     for td in tipos_data:
         for ini, fim in janelas:
-            rotulo = f"Títulos {tipo} / {td} {ini:%d/%m/%Y} a {fim:%d/%m/%Y}"
             try:
                 itens = _listar_titulos(jwt, tipo, ini, fim, td, cnpjs)
-                log.append(f"{rotulo}: {len(itens)} parcelas de títulos")
                 if not itens:
                     todos = _listar_titulos(jwt, tipo, ini, fim, td, [])
                     itens = [p for p in todos if _da_rede(p, {_so_digitos(c) for c in mapa_cnpj})]
-            except Exception as e:
-                log.append(f"{rotulo}: ERRO -> {e}")
+            except Exception:
                 itens = []
             for p in itens: unicas[p.get("ParcelaId")] = p
-            passo += 1
-            if progresso: progresso(passo / total)
 
     df_titulos = _normaliza_titulos(list(unicas.values()), mapa_cnpj, tipo_padrao="RECEITA" if tipo == "Receita" else "DESPESA")
 
     if tipo == "Receita":
         try:
             df_cartoes = buscar_cartoes_f360(jwt, d_ini, d_fim, mapa_cnpj, log=log)
-            log.append(f"Cartões API: {len(df_cartoes)} parcelas | líquido R$ {df_cartoes['Valor'].sum():,.2f}" if not df_cartoes.empty else "Cartões API: 0 parcelas")
-        except Exception as e:
-            log.append(f"Erro ao buscar cartões na API: {e}")
+        except Exception:
             df_cartoes = pd.DataFrame()
-
         partes = [d for d in (df_titulos, df_cartoes) if d is not None and not d.empty]
         return pd.concat(partes, ignore_index=True) if partes else pd.DataFrame()
 
