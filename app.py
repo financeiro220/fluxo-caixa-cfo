@@ -74,6 +74,9 @@ SALDOS_INICIAIS_AGOSTO = {
     "61 Itaú Goiabeiras": 300.77
 }
 
+# FERIADOS CONHECIDOS
+FERIADOS = ['2026-09-07']
+
 # ---------------------------------------------------------
 # CATEGORIZAÇÃO DE PLANOS DE CONTAS
 # ---------------------------------------------------------
@@ -116,11 +119,8 @@ def carregar_receitas_api_f360(jwt_token, d_ini, d_fim, log=None):
     return df_rec
 
 # ---------------------------------------------------------
-# INTERFACE SIDEBAR (TOTALMENTE AUTOMÁTICA VIA API)
+# INTERFACE SIDEBAR
 # ---------------------------------------------------------
-st.markdown("<div class='main-title'>🍦 Gelateria Borelli - Gestão de Fluxo de Caixa (100% API)</div>", unsafe_allow_html=True)
-st.markdown("<div class='main-subtitle'>Extrato Diário Automatizado por Contas Bancárias (17 Pantanal Itaú, 51 Estação Itaú, 61 Itaú Goiabeiras, 52 RT e 36 MJL)</div>", unsafe_allow_html=True)
-
 with st.sidebar:
     st.header("⚡ Sincronização API F360")
     
@@ -132,7 +132,7 @@ with st.sidebar:
         hoje = date(2026, 9, 1)
         periodo_api = st.date_input(
             "Período de Busca", 
-            (hoje.replace(day=1), hoje + timedelta(days=30)), 
+            (hoje.replace(day=1), hoje.replace(day=1) + timedelta(days=29)), 
             format="DD/MM/YYYY"
         )
         
@@ -142,10 +142,14 @@ with st.sidebar:
         log = []
         if btn_sincronizar and len(periodo_api) == 2:
             try:
+                # FORÇA SEMPRE A BUSCA DESDE O DIA 1 DO MÊS SELECIONADO
+                d_ini_api = periodo_api[0].replace(day=1)
+                d_fim_api = periodo_api[1]
+
                 with st.spinner("Sincronizando extratos, cartões e despesas com a F360..."):
-                    df_desp_api = carregar_despesas_api_f360(st.session_state.jwt, periodo_api[0], periodo_api[1], log)
-                    df_rec_api = carregar_receitas_api_f360(st.session_state.jwt, periodo_api[0], periodo_api[1], log)
-                    saldos_api = buscar_saldos_bancarios_f360(st.session_state.jwt, periodo_api[0], periodo_api[1], log)
+                    df_desp_api = carregar_despesas_api_f360(st.session_state.jwt, d_ini_api, d_fim_api, log)
+                    df_rec_api = carregar_receitas_api_f360(st.session_state.jwt, d_ini_api, d_fim_api, log)
+                    saldos_api = buscar_saldos_bancarios_f360(st.session_state.jwt, d_ini_api, d_fim_api, log)
                     
                     st.session_state.df_api_desp = df_desp_api
                     st.session_state.df_api_rec = df_rec_api
@@ -168,7 +172,7 @@ if 'filtro_kpi' not in st.session_state:
     st.session_state.filtro_kpi = "PENDENTE"
 
 # ---------------------------------------------------------
-# PROCESSAMENTO DE DADOS EXCLUSIVAMENTE VIA API
+# PROCESSAMENTO DE DADOS
 # ---------------------------------------------------------
 df_despesas_fonte = st.session_state.get("df_api_desp")
 df_receitas_fonte = st.session_state.get("df_api_rec")
@@ -181,6 +185,20 @@ if df_receitas_fonte is not None and not df_receitas_fonte.empty:
     df_tudo_list.append(df_receitas_fonte)
 
 df_tudo = pd.concat(df_tudo_list, ignore_index=True) if len(df_tudo_list) > 0 else None
+
+# ---------------------------------------------------------
+# REGRA DE NEGÓCIO: EMPURRAR FINAIS DE SEMANA E FERIADOS
+# ---------------------------------------------------------
+def proximo_dia_util(d):
+    if pd.isna(d): return d
+    d_ts = pd.to_datetime(d)
+    # 5 = Sábado, 6 = Domingo
+    while d_ts.weekday() >= 5 or d_ts.strftime('%Y-%m-%d') in FERIADOS:
+        d_ts += timedelta(days=1)
+    return d_ts
+
+if df_tudo is not None and not df_tudo.empty:
+    df_tudo['Vencimento_dt'] = df_tudo['Vencimento_dt'].apply(proximo_dia_util)
 
 # ---------------------------------------------------------
 # RENDERIZAÇÃO DO DASHBOARD
@@ -202,7 +220,7 @@ if df_tudo is not None and not df_tudo.empty:
             conta_selecionada = st.radio("", contas_opcoes, horizontal=True)
 
         with col_filtro2:
-            st.caption("📅 **Período de Caixa:**")
+            st.caption("📅 **Período de Exibição no Caixa:**")
             date_range = st.date_input(
                 "",
                 value=(min_date, max_date),
@@ -229,7 +247,7 @@ if df_tudo is not None and not df_tudo.empty:
         df_receitas = df_filtered[df_filtered['Tipo_Movimento'] == 'RECEITA'].copy()
         df_despesas = df_filtered[df_filtered['Tipo_Movimento'] == 'DESPESA'].copy()
 
-        # ISOLAR MÚTUO/TRANSFERÊNCIAS DE VENDAS PURAS
+        # ISOLAR MÚTUO/TRANSFERÊNCIAS
         df_rec_vendas = df_receitas[df_receitas['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"].copy() if not df_receitas.empty else pd.DataFrame()
         df_rec_mutuo = df_receitas[df_receitas['Categoria_CFO'] == "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"].copy() if not df_receitas.empty else pd.DataFrame()
 
@@ -330,9 +348,6 @@ if df_tudo is not None and not df_tudo.empty:
         with tab2:
             st.subheader("Matriz Diária com Saldo de Encerramento (Visão Extrato Bancário F360)")
             
-            # =========================================================================
-            # CORREÇÃO: CRIA AS COLUNAS DE TODOS OS DIAS DO CALENDÁRIO (SEM PULAR)
-            # =========================================================================
             if isinstance(date_range, tuple) and len(date_range) > 0:
                 s_date = date_range[0]
                 e_date = date_range[1] if len(date_range) == 2 else s_date
@@ -346,23 +361,14 @@ if df_tudo is not None and not df_tudo.empty:
                 if d_atual.day not in dias_mes:
                     dias_mes.append(d_atual.day)
                 d_atual += timedelta(days=1)
-            # =========================================================================
             
-            # 1. Vendas puras
             piv_ent_vendas = df_rec_vendas[df_rec_vendas['Status_Clean'] == 'REALIZADO'].groupby(df_rec_vendas['Vencimento_dt'].dt.day)['Valor'].sum() if not df_rec_vendas.empty else pd.Series(0.0, index=dias_mes)
-            
-            # 2. Transferências de Entrada (Mútuo)
             piv_transf_in = df_rec_mutuo[df_rec_mutuo['Status_Clean'] == 'REALIZADO'].groupby(df_rec_mutuo['Vencimento_dt'].dt.day)['Valor'].sum() if not df_rec_mutuo.empty else pd.Series(0.0, index=dias_mes)
-            
-            # 3. Saídas operacionais
             piv_sai_op = df_desp_operacional[df_desp_operacional['Status_Clean'] == 'REALIZADO'].groupby(df_desp_operacional['Vencimento_dt'].dt.day)['Valor'].sum() if not df_desp_operacional.empty else pd.Series(0.0, index=dias_mes)
-            
-            # 4. Transferências de Saída (Empréstimo Mútuo)
             piv_transf_out = df_desp_mutuo[df_desp_mutuo['Status_Clean'] == 'REALIZADO'].groupby(df_desp_mutuo['Vencimento_dt'].dt.day)['Valor'].sum() if not df_desp_mutuo.empty else pd.Series(0.0, index=dias_mes)
 
             row_s_ini, row_vendas, row_tin, row_tot_ent, row_saidas, row_tout, row_tot_sai, row_liq_op, row_saldo_final = {}, {}, {}, {}, {}, {}, {}, {}, {}
 
-            # O SALDO INICIAL FIXADO DE 31/08
             if conta_selecionada in SALDOS_INICIAIS_AGOSTO:
                 saldo_acumulado = SALDOS_INICIAIS_AGOSTO[conta_selecionada]
             else:
@@ -381,14 +387,13 @@ if df_tudo is not None and not df_tudo.empty:
                 
                 liq_op = v - s
                 
-                # SE A API DE SALDOS BANCÁRIOS TROUXER O FECHAMENTO REAL DO DIA, UTILIZA ELA
                 key_saldo = (conta_selecionada, d)
                 if key_saldo in saldos_api_dict:
                     s_final = saldos_api_dict[key_saldo]
                 else:
                     s_final = s_inicial + tot_e - tot_s
                 
-                saldo_acumulado = s_final  # Transporta continuamente para o dia seguinte
+                saldo_acumulado = s_final 
                 
                 row_s_ini[d] = s_inicial
                 row_vendas[d] = v
@@ -411,7 +416,7 @@ if df_tudo is not None and not df_tudo.empty:
                 {"Linha de Extrato": "5. (-) Transferências Concedidas (Empréstimo Mútuo / Saídas)", **row_tout},
                 {"Linha de Extrato": "6. (=) TOTAL DE SAÍDAS (Despesas + Transferências)", **row_tot_sai},
                 {"Linha de Extrato": "7. (=) Resultado Líquido Operacional (Vendas - Saídas)", **row_liq_op},
-                {"Linha de Extrato": "8. 🏦 SALDO FINAL EM CONTA BANCÁRIA (API / Conciliado)", **row_saldo_final}
+                {"Linha de Extrato": "8. 🏦 SALDO FINAL EM CONTA BANCÁRIA", **row_saldo_final}
             ])
             
             cols_order = ["Linha de Extrato"] + dias_mes
