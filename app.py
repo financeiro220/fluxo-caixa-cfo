@@ -69,7 +69,10 @@ with st.sidebar:
 if 'filtro_kpi' not in st.session_state: st.session_state.filtro_kpi = "PENDENTE"
 fluxo_oficial = carregar_fluxo_oficial(file_fluxo_oficial) if file_fluxo_oficial else {}
 
-df_api = pd.concat([d for d in [st.session_state.get("df_api_desp"), st.session_state.get("df_api_rec")] if d is not None and not d.empty], ignore_index=True) if st.session_state.get("df_api_desp") is not None else pd.DataFrame()
+# === CORREÇÃO DO ERRO APLICADA AQUI ===
+_lista_dfs = [d for d in [st.session_state.get("df_api_desp"), st.session_state.get("df_api_rec")] if d is not None and not d.empty]
+df_api = pd.concat(_lista_dfs, ignore_index=True) if _lista_dfs else pd.DataFrame()
+# ========================================
 
 col1, col2 = st.columns([2, 1])
 with col1: conta_selecionada = st.radio("Conta:", ["Ver Todas as Contas", "17 Pantanal Itaú", "51 Estação Itaú", "61 Itaú Goiabeiras", "52 RT", "36 MJL"], horizontal=True)
@@ -86,7 +89,9 @@ if not df_kpi.empty:
 df_rec_kpi = df_kpi[(df_kpi['Tipo_Movimento'] == 'RECEITA') & (df_kpi['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")] if not df_kpi.empty else pd.DataFrame()
 df_desp_kpi = df_kpi[(df_kpi['Tipo_Movimento'] == 'DESPESA') & (df_kpi['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")] if not df_kpi.empty else pd.DataFrame()
 
-tot_rec = df_rec_kpi['Valor'].sum() if not df_rec_kpi.empty else 0.0
+tot_rec_prev = df_rec_kpi['Valor'].sum() if not df_rec_kpi.empty else 0.0
+tot_rec_real = df_rec_kpi[df_rec_kpi['Status_Clean'] == 'REALIZADO']['Valor'].sum() if not df_rec_kpi.empty else tot_rec_prev
+
 tot_prev, tot_real, tot_pend = 0.0, 0.0, 0.0
 if not df_desp_kpi.empty:
     tot_prev = df_desp_kpi['Valor'].sum()
@@ -98,10 +103,10 @@ k1, k2, k3, k4 = st.columns(4)
 with k1: st.button(f"📊 PREVISTAS\nR$ {tot_prev:,.2f}", use_container_width=True)
 with k2: st.button(f"🟢 LIQUIDADAS\nR$ {tot_real:,.2f}", use_container_width=True)
 with k3: st.button(f"🔴 EM ABERTO\nR$ {tot_pend:,.2f}", use_container_width=True)
-with k4: st.metric("Receita Líquida (API)", f"R$ {tot_rec:,.2f}")
+with k4: st.metric("Receita Líquida (API)", f"R$ {tot_rec_prev:,.2f}", delta=f"Realizado: R$ {tot_rec_real:,.2f}")
 
 st.markdown("<br>", unsafe_allow_html=True)
-tab1, tab2 = st.tabs(["📅 Fluxo Diário (Fonte Excel F360)", "📋 DRE de Caixa (Fonte API)"])
+tab1, tab2, tab3 = st.tabs(["📅 Fluxo Diário (Fonte Excel F360)", "📋 DRE de Caixa (Fonte API)", "🏪 Comparativo Por Conta"])
 
 with tab1:
     st.subheader("Matriz Diária - Valores 100% Espelhados do F360")
@@ -131,12 +136,22 @@ with tab1:
 with tab2:
     st.subheader("DRE de Caixa (Visão Gerencial por Plano de Contas)")
     if not df_api.empty:
-        dre_list = [{"Categoria CFO": "0. RECEITAS DE VENDAS", "Realizado (R$)": f"R$ {tot_rec:,.2f}"}]
+        dre_list = [{"Categoria CFO": "0. RECEITAS DE VENDAS", "Previsto (R$)": f"R$ {tot_rec_prev:,.2f}", "Realizado (R$)": f"R$ {tot_rec_real:,.2f}", "Variação (R$)": f"R$ {tot_rec_real - tot_rec_prev:,.2f}"}]
         cats = ["1. FORNECEDORES / MERCADORIAS (CMV)", "2. IMPOSTOS SOBRE VENDAS", "3. DESPESAS DE OCUPAÇÃO", "4. FOLHA DE PAGAMENTO & ENCARGOS", "5. DESPESAS OPERACIONAIS & VENDAS", "6. AMORTIZAÇÃO DE DÍVIDAS & CAPITAL"]
         for c in cats:
-            r = df_desp_kpi[df_desp_kpi['Categoria_CFO'] == c]['Valor'].sum() if not df_desp_kpi.empty else 0.0
-            dre_list.append({"Categoria CFO": f"   (-) {c}", "Realizado (R$)": f"R$ {r:,.2f}"})
-        res_real = tot_rec - tot_real
-        dre_list.append({"Categoria CFO": "(=) EBITDA", "Realizado (R$)": f"R$ {res_real:,.2f}"})
+            p = df_desp_kpi[df_desp_kpi['Categoria_CFO'] == c]['Valor'].sum() if not df_desp_kpi.empty else 0.0
+            r = df_desp_kpi[(df_desp_kpi['Categoria_CFO'] == c) & (df_desp_kpi['Status_Clean'] == 'REALIZADO')]['Valor'].sum() if not df_desp_kpi.empty else 0.0
+            dre_list.append({"Categoria CFO": f"   (-) {c}", "Previsto (R$)": f"R$ {p:,.2f}", "Realizado (R$)": f"R$ {r:,.2f}", "Variação (R$)": f"R$ {r - p:,.2f}"})
+        res_prev = tot_rec_prev - tot_prev
+        res_real = tot_rec_real - tot_real
+        dre_list.append({"Categoria CFO": "(=) EBITDA", "Previsto (R$)": f"R$ {res_prev:,.2f}", "Realizado (R$)": f"R$ {res_real:,.2f}", "Variação (R$)": f"R$ {res_real - res_prev:,.2f}"})
         st.dataframe(pd.DataFrame(dre_list), use_container_width=True, hide_index=True)
     else: st.warning("Sincronize a API no menu lateral para visualizar o DRE.")
+
+with tab3:
+    st.subheader("Matriz Comparativa por Conta Bancária")
+    if not df_desp_kpi.empty:
+        pivot_store = df_desp_kpi.pivot_table(index='Categoria_CFO', columns='Empresa', values='Valor', aggfunc='sum', fill_value=0)
+        st.dataframe(pivot_store.style.format("R$ {:,.2f}"), use_container_width=True)
+    else:
+        st.warning("Sincronize a API para gerar o comparativo entre as contas.")
