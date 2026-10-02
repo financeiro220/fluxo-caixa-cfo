@@ -9,8 +9,10 @@ from datetime import datetime, date, timedelta
 # IMPORTAÇÃO DO MÓDULO F360
 from f360_api import (
     autenticar_f360, 
-    buscar_parcelas_f360, 
-    buscar_saldos_bancarios_f360,
+    buscar_parcelas_f360,
+    processar_parcelas_cartoes_arquivo,
+    processar_detalhes_fluxo_caixa,
+    processar_fluxo_de_caixa_oficial,
     IDS_CONTAS_BORELLI
 )
 
@@ -55,9 +57,9 @@ MAPA_CNPJ_LOJA = {
     "36240923000320": "8 - GOIABEIRAS"
 }
 
-# FERIADOS NACIONAIS / REGIONAIS CONHECIDOS
-FERIADOS = ['2026-09-07']
-
+# ---------------------------------------------------------
+# CATEGORIZAÇÃO DE PLANOS DE CONTAS
+# ---------------------------------------------------------
 def categorizar_plano_contas(plano):
     if pd.isna(plano): return "5. DESPESAS OPERACIONAIS & VENDAS"
     p = str(plano).upper().strip()
@@ -92,11 +94,24 @@ def carregar_receitas_api_f360(jwt_token, d_ini, d_fim, log=None):
         df_rec["Tipo_Movimento"] = "RECEITA"
     return df_rec
 
+# Função para cachear o carregamento do Fluxo Oficial
+@st.cache_data(ttl=3600)
+def carregar_fluxo_oficial(_arquivos, nomes):
+    resultado = {}
+    for arq in _arquivos:
+        df_dias, saldo_ini, contas = processar_fluxo_de_caixa_oficial(arq)
+        chave = contas[0] if len(contas) == 1 else "Ver Todas as Contas"
+        resultado[chave] = {"df": df_dias, "saldo_inicial": saldo_ini, "contas": contas}
+    return resultado
+
 # ---------------------------------------------------------
-# INTERFACE SIDEBAR (SALDOS INICIAIS DINÂMICOS)
+# INTERFACE SIDEBAR 
 # ---------------------------------------------------------
+st.markdown("<div class='main-title'>🍦 Gelateria Borelli - Gestão de Fluxo de Caixa</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-subtitle'>Extrato Diário por Contas Bancárias</div>", unsafe_allow_html=True)
+
 with st.sidebar:
-    st.header("⚡ Sincronização API F360")
+    st.header("⚡ Sincronização API F360 (DRE)")
     
     if "jwt" not in st.session_state or st.session_state.jwt is None:
         st.session_state.jwt = autenticar_f360(F360_TOKEN)
@@ -105,30 +120,11 @@ with st.sidebar:
         hoje = date(2026, 9, 1)
         periodo_api = st.date_input("Período de Busca", (hoje.replace(day=1), hoje.replace(day=1) + timedelta(days=29)), format="DD/MM/YYYY")
         
-        st.divider()
-        st.subheader("🏦 Saldos Iniciais do Mês (D-1)")
-        st.caption("Altere os saldos de abertura oficiais do banco aqui:")
-        saldo_17 = st.number_input("17 Pantanal Itaú", value=24053.13, step=100.0)
-        saldo_36 = st.number_input("36 MJL", value=500.00, step=100.0)
-        saldo_51 = st.number_input("51 Estação Itaú", value=333.38, step=100.0)
-        saldo_52 = st.number_input("52 RT", value=3434.92, step=100.0)
-        saldo_61 = st.number_input("61 Itaú Goiabeiras", value=300.77, step=100.0)
-        
-        SALDOS_INICIAIS = {
-            "17 Pantanal Itaú": saldo_17,
-            "36 MJL": saldo_36,
-            "51 Estação Itaú": saldo_51,
-            "52 RT": saldo_52,
-            "61 Itaú Goiabeiras": saldo_61
-        }
-        
-        st.markdown("---")
         btn_sincronizar = st.button("🚀 Sincronizar Tudo via API", use_container_width=True)
         
         log = []
         if btn_sincronizar and len(periodo_api) == 2:
             try:
-                # FORÇA BUSCA DESDE O DIA 1 DO MÊS PARA GARANTIR CÁLCULOS
                 d_ini_api = periodo_api[0].replace(day=1)
                 d_fim_api = periodo_api[1]
 
@@ -139,29 +135,24 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"Erro na Sincronização: {e}")
 
+    st.divider()
+    st.header("🏦 Fluxo de Caixa Oficial")
+    file_fluxo_oficial = st.file_uploader(
+        "F360 > Fluxo de Caixa > Exportar\n(Fonte da verdade para o Extrato Diário)",
+        type=["xlsx"], accept_multiple_files=True, key="fluxo_oficial"
+    )
+
 if 'filtro_kpi' not in st.session_state: st.session_state.filtro_kpi = "PENDENTE"
 
 # ---------------------------------------------------------
-# PROCESSAMENTO DE DADOS E CORREÇÃO BANCÁRIA
+# PROCESSAMENTO DE DADOS (ARQUIVOS E API)
 # ---------------------------------------------------------
+fluxo_oficial = carregar_fluxo_oficial(file_fluxo_oficial, tuple(f.name for f in file_fluxo_oficial)) if file_fluxo_oficial else {}
+
 df_tudo_list = []
 if st.session_state.get("df_api_desp") is not None and not st.session_state["df_api_desp"].empty: df_tudo_list.append(st.session_state["df_api_desp"])
 if st.session_state.get("df_api_rec") is not None and not st.session_state["df_api_rec"].empty: df_tudo_list.append(st.session_state["df_api_rec"])
 df_tudo = pd.concat(df_tudo_list, ignore_index=True) if df_tudo_list else None
-
-def proximo_dia_util(d):
-    """
-    Empurra as datas de Finais de Semana e Feriados para Segunda-feira.
-    Contas bancárias nunca movimentam em feriados, igual no F360.
-    """
-    if pd.isna(d): return d
-    d_ts = pd.to_datetime(d)
-    while d_ts.weekday() >= 5 or d_ts.strftime('%Y-%m-%d') in FERIADOS: 
-        d_ts += timedelta(days=1)
-    return d_ts
-
-if df_tudo is not None and not df_tudo.empty:
-    df_tudo['Vencimento_dt'] = df_tudo['Vencimento_dt'].apply(proximo_dia_util)
 
 # ---------------------------------------------------------
 # RENDERIZAÇÃO DO DASHBOARD
@@ -175,7 +166,7 @@ if df_tudo is not None and not df_tudo.empty:
     with col_filtro1:
         conta_selecionada = st.radio("", ["Ver Todas as Contas", "17 Pantanal Itaú", "51 Estação Itaú", "61 Itaú Goiabeiras", "52 RT", "36 MJL"], horizontal=True)
     with col_filtro2:
-        date_range = st.date_input("Período de Exibição no Caixa", value=(min_date, max_date), min_value=min_date, max_value=max_date, format="DD/MM/YYYY")
+        date_range = st.date_input("Período de Exibição", value=(min_date, max_date), min_value=min_date, max_value=max_date, format="DD/MM/YYYY")
 
     df_filtered = df_tudo.copy()
     if conta_selecionada != "Ver Todas as Contas": df_filtered = df_filtered[df_filtered['Empresa'] == conta_selecionada]
@@ -210,77 +201,38 @@ if df_tudo is not None and not df_tudo.empty:
     tab1, tab2, tab3 = st.tabs(["📅 Fluxo Diário (Extrato Banco)", "📋 DRE de Caixa", "🏪 Comparativo Por Conta"])
     
     with tab1:
-        st.subheader("Matriz Diária com Saldo de Encerramento (Visão Extrato Bancário F360)")
+        st.subheader("Matriz Diária com Saldo de Encerramento")
+        chave_busca = conta_selecionada
+        oficial = fluxo_oficial.get(chave_busca) or (fluxo_oficial.get("Ver Todas as Contas") if chave_busca == "Ver Todas as Contas" else None)
         
-        dias_visiveis = []
-        if isinstance(date_range, tuple) and len(date_range) == 2:
-            d_temp = date_range[0]
-            while d_temp <= date_range[1]:
-                if d_temp.day not in dias_visiveis:
-                    dias_visiveis.append(d_temp.day)
-                d_temp += timedelta(days=1)
-        else:
-            dias_visiveis = list(range(min_date.day, max_date.day + 1))
-
-        dias_mes_calc = list(range(1, 32))
-        
-        df_rec_total = df_filtered[df_filtered['Tipo_Movimento'] == 'RECEITA']
-        df_desp_total = df_filtered[df_filtered['Tipo_Movimento'] == 'DESPESA']
-        
-        p_vendas = df_rec_total[(df_rec_total['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO") & (df_rec_total['Status_Clean'] == 'REALIZADO')].groupby(df_rec_total['Vencimento_dt'].dt.day)['Valor'].sum()
-        p_tin = df_rec_total[(df_rec_total['Categoria_CFO'] == "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO") & (df_rec_total['Status_Clean'] == 'REALIZADO')].groupby(df_rec_total['Vencimento_dt'].dt.day)['Valor'].sum()
-        p_sai = df_desp_total[(df_desp_total['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO") & (df_desp_total['Status_Clean'] == 'REALIZADO')].groupby(df_desp_total['Vencimento_dt'].dt.day)['Valor'].sum()
-        p_tout = df_desp_total[(df_desp_total['Categoria_CFO'] == "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO") & (df_desp_total['Status_Clean'] == 'REALIZADO')].groupby(df_desp_total['Vencimento_dt'].dt.day)['Valor'].sum()
-
-        row_s_ini, row_vendas, row_tin, row_tot_ent, row_saidas, row_tout, row_tot_sai, row_liq_op, row_saldo_final = {}, {}, {}, {}, {}, {}, {}, {}, {}
-
-        if conta_selecionada in SALDOS_INICIAIS:
-            saldo_acumulado = SALDOS_INICIAIS[conta_selecionada]
-        else:
-            saldo_acumulado = sum(SALDOS_INICIAIS.values())
-
-        for d in dias_mes_calc:
-            s_inicial = saldo_acumulado
-            v = p_vendas.get(d, 0.0)
-            tin = p_tin.get(d, 0.0)
-            tot_e = v + tin
-            s = p_sai.get(d, 0.0)
-            tout = p_tout.get(d, 0.0)
-            tot_s = s + tout
-            liq_op = v - s
-            s_final = s_inicial + tot_e - tot_s
-            saldo_acumulado = s_final 
+        if oficial:
+            st.success("✅ Usando o relatório oficial do F360 — bate 100% com a tela de Fluxo de Caixa.")
+            df_of = oficial["df"]
+            linhas_of = [
+                {"Linha de Extrato": "0. 🏦 SALDO INICIAL DO DIA", 1: oficial["saldo_inicial"]},
+                {"Linha de Extrato": "1. (+) Cartões", **dict(zip(df_of["Dia"], df_of["Cartoes"]))},
+                {"Linha de Extrato": "2. (+) Outros Recebimentos (PIX/Dinheiro/Boleto)", **dict(zip(df_of["Dia"], df_of["Outros_Recebimentos"]))},
+                {"Linha de Extrato": "3. (+) Orçamento de Receita (previsão)", **dict(zip(df_of["Dia"], df_of["Orcamento_Entrada"]))},
+                {"Linha de Extrato": "4. (=) Total de Entradas", **dict(zip(df_of["Dia"], df_of["Total_Entradas"]))},
+                {"Linha de Extrato": "5. (-) Total de Saídas", **dict(zip(df_of["Dia"], df_of["Total_Saidas"]))},
+                {"Linha de Extrato": "6. 🏦 SALDO FINAL EM CONTA", **dict(zip(df_of["Dia"], df_of["Saldo"]))},
+            ]
             
-            if d in dias_visiveis:
-                row_s_ini[d] = s_inicial
-                row_vendas[d] = v
-                row_tin[d] = tin
-                row_tot_ent[d] = tot_e
-                row_saidas[d] = s
-                row_tout[d] = tout
-                row_tot_sai[d] = tot_s
-                row_liq_op[d] = liq_op
-                row_saldo_final[d] = s_final
+            # Transporta o saldo inicial (que só tem no dia 1 na exportação) para todos os dias baseando no saldo do dia anterior
+            dias_of = sorted(df_of["Dia"].unique().tolist())
+            for i in range(1, len(dias_of)):
+                dia_atual = dias_of[i]
+                dia_anterior = dias_of[i-1]
+                linhas_of[0][dia_atual] = linhas_of[6][dia_anterior]
 
-        if dias_visiveis:
-            df_extrato_diario = pd.DataFrame([
-                {"Linha de Extrato": "0. 🏦 SALDO INICIAL DO DIA", **row_s_ini},
-                {"Linha de Extrato": "1. (+) Total Vendas Liquidadas", **row_vendas},
-                {"Linha de Extrato": "2. (+) Transferências Recebidas", **row_tin},
-                {"Linha de Extrato": "3. (=) TOTAL DE ENTRADAS", **row_tot_ent},
-                {"Linha de Extrato": "4. (-) Total Saídas Liquidadas", **row_saidas},
-                {"Linha de Extrato": "5. (-) Transferências Concedidas", **row_tout},
-                {"Linha de Extrato": "6. (=) TOTAL DE SAÍDAS", **row_tot_sai},
-                {"Linha de Extrato": "7. (=) Resultado Líquido", **row_liq_op},
-                {"Linha de Extrato": "8. 🏦 SALDO FINAL EM CONTA BANCÁRIA", **row_saldo_final}
-            ])
-            cols_order = ["Linha de Extrato"] + dias_visiveis
-            st.dataframe(df_extrato_diario[cols_order].style.format({d: "R$ {:,.2f}" for d in dias_visiveis}), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(linhas_of)[["Linha de Extrato"] + dias_of]
+                         .style.format({d: "R$ {:,.2f}" for d in dias_of}),
+                         use_container_width=True, hide_index=True)
         else:
-            st.warning("Nenhum dia selecionado no filtro.")
+            st.warning("⚠️ Nenhum relatório oficial anexado para esta conta. Anexe o 'Fluxo de Caixa.xlsx' na barra lateral para ver o Extrato.")
             
     with tab2:
-        st.subheader("Demonstrativo do Fluxo de Caixa (Previsto vs. Realizado)")
+        st.subheader("Demonstrativo do Fluxo de Caixa (DRE de Caixa)")
         dre_list = [{"Categoria CFO": "0. RECEITAS DE VENDAS / ENTRADAS (LÍQUIDO)", "Previsto (R$)": f"R$ {tot_receita_prevista:,.2f}", "Realizado (R$)": f"R$ {tot_receita_realizada:,.2f}", "Variação (R$)": f"R$ {tot_receita_realizada - tot_receita_prevista:,.2f}", "% do Total": "100.0%"}]
         cats = ["1. FORNECEDORES / MERCADORIAS (CMV)", "2. IMPOSTOS SOBRE VENDAS", "3. DESPESAS DE OCUPAÇÃO", "4. FOLHA DE PAGAMENTO & ENCARGOS", "5. DESPESAS OPERACIONAIS & VENDAS", "6. AMORTIZAÇÃO DE DÍVIDAS & CAPITAL"]
         for c in cats:
@@ -304,6 +256,6 @@ else:
     st.markdown("""
     <div class='welcome-card'>
         <h3>🍦 Painel de Fluxo de Caixa Executivo - Gelateria Borelli</h3>
-        <p>Aguardando sincronização automática no menu lateral.</p>
+        <p>Aguardando integração. Anexe o relatório de Fluxo de Caixa do F360 na barra lateral e Sincronize a API para gerar o DRE.</p>
     </div>
     """, unsafe_allow_html=True)
