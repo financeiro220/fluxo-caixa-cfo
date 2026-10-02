@@ -1,5 +1,5 @@
 """
-f360_api.py - Integração com a API pública do F360 e Relatórios Oficiais.
+f360_api.py - Integração Total com a API Pública F360.
 """
 import json
 import re
@@ -22,7 +22,12 @@ IDS_CONTAS_BORELLI = {
 
 def autenticar_f360(token_api):
     try:
-        r = requests.post(f"{BASE}/PublicLoginAPI/DoLogin", json={"token": token_api}, headers={"Content-Type": "application/json"}, timeout=30)
+        r = requests.post(
+            f"{BASE}/PublicLoginAPI/DoLogin",
+            json={"token": token_api},
+            headers={"Content-Type": "application/json"},
+            timeout=30,
+        )
         if r.status_code == 200:
             res = r.json()
             if isinstance(res, dict): return res.get("Token") or res.get("Result") or res.get("token")
@@ -38,7 +43,8 @@ def _janelas(d_ini, d_fim):
         yield atual, fim
         atual = fim + timedelta(days=1)
 
-def _so_digitos(s): return re.sub(r"\D", "", str(s or ""))
+def _so_digitos(s):
+    return re.sub(r"\D", "", str(s or ""))
 
 def _fmt_cnpj(c):
     d = _so_digitos(c)
@@ -79,21 +85,34 @@ def _mapear_conta_para_loja(conta_str):
     elif "36" in c or "MJL" in c: return "36 MJL"
     return str(conta_str) or "17 Pantanal Itaú"
 
+# ==========================================
+# PARCELAS DE TÍTULOS
+# ==========================================
 def _listar_titulos(jwt, tipo, ini, fim, tipo_datas, cnpjs):
     headers = {"Authorization": f"Bearer {jwt}", "Content-Type": "application/json"}
     url = f"{BASE}/ParcelasDeTituloPublicAPI/ListarParcelasDeTitulos"
     pagina, total, saida = 1, 1, []
     while pagina <= total:
-        params = {"pagina": pagina, "tipo": tipo, "inicio": ini.isoformat(), "fim": fim.isoformat(), "tipoDatas": tipo_datas, "status": "Todos"}
+        params = {
+            "pagina": pagina, 
+            "tipo": tipo, 
+            "inicio": ini.strftime("%Y-%m-%d"), 
+            "fim": fim.strftime("%Y-%m-%d"), 
+            "tipoDatas": tipo_datas, 
+            "status": "Todos"
+        }
         if cnpjs: params["empresas"] = ",".join(cnpjs)
+        
         r = requests.get(url, headers=headers, params=params, timeout=60)
-        if r.status_code == 200:
-            corpo = r.json()
-            res = corpo.get("Result") or {}
-            saida.extend(res.get("Parcelas", []))
-            total = res.get("QuantidadeDePaginas", 1) or 1
-        else:
+        if r.status_code != 200:
             break
+        corpo = r.json()
+        if isinstance(corpo, dict) and corpo.get("Ok") is False:
+            break
+            
+        res = corpo.get("Result") or {}
+        saida.extend(res.get("Parcelas", []))
+        total = res.get("QuantidadeDePaginas", 1) or 1
         pagina += 1
     return saida
 
@@ -107,15 +126,18 @@ def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
         status = str(p.get("Status", ""))
         s_low = status.lower()
         if p.get("Cancelada") or "cancelad" in s_low or "baixad" in s_low: continue
+        
         tit = p.get("DadosDoTitulo") or {}
         fornecedor = (tit.get("ClienteFornecedor") or {}).get("Nome", "") or ""
         realizado = "liquidado" in s_low or "conciliado" in s_low or pd.notna(p.get("Liquidacao"))
         bruto = float(p.get("ValorBruto") or 0)
         conta_loja = _mapear_conta_para_loja(p.get("Conta"))
+        
         tipo_item = str(p.get("Tipo") or tit.get("Tipo") or "").lower()
         if "receita" in tipo_item or "receber" in tipo_item: tipo_mov = "RECEITA"
         elif "despesa" in tipo_item or "pagar" in tipo_item: tipo_mov = "DESPESA"
         else: tipo_mov = tipo_padrao
+        
         rateio = p.get("Rateio") or [{}]
         soma = sum(abs(float(r.get("Valor") or 0)) for r in rateio)
         for r in rateio:
@@ -137,6 +159,9 @@ def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
         df["Dia"] = df["Vencimento_dt"].dt.day
     return df
 
+# ==========================================
+# PARCELAS DE CARTÕES
+# ==========================================
 _ALIAS = {"empresa": ["empresa", "cnpj"], "adquirente": ["adquirente"], "bandeira": ["bandeira"], "venda": ["dtvenda"], "vencimento": ["vencimento"], "bruto": ["vbruto", "valorbruto"], "liquido": ["vliquido", "valorliquido"], "conta": ["conta"], "liquidacao": ["liquidacao"], "id": ["id"], "modalidade": ["modalidade"]}
 def _k(s): return re.sub(r"[^a-z]", "", unicodedata.normalize("NFKD", str(s)).encode("ascii", "ignore").decode().lower())
 def _pega(reg, chave):
@@ -156,7 +181,9 @@ def _normaliza_cartoes(registros, mapa_cnpj):
         reg = _achata(reg)
         if str(reg.get("Cancelada")).lower() == "true": continue
         conta_loja = _mapear_conta_para_loja(_pega(reg, "conta"))
-        adq, band, modal = str(_pega(reg, "adquirente") or "Cartão").strip(), str(_pega(reg, "bandeira") or "").strip(), str(_pega(reg, "modalidade") or "").strip()
+        adq = str(_pega(reg, "adquirente") or "Cartão").strip()
+        band = str(_pega(reg, "bandeira") or "").strip()
+        modal = str(_pega(reg, "modalidade") or "").strip()
         bruto = _num(_pega(reg, "bruto"))
         v_liq = _pega(reg, "liquido")
         linhas.append({
@@ -175,36 +202,56 @@ def _normaliza_cartoes(registros, mapa_cnpj):
         df["Dia"] = df["Vencimento_dt"].dt.day
     return df
 
+def _listar_cartoes_api(jwt, tipo, ini, fim, tipo_datas, cnpjs):
+    headers = {"Authorization": f"Bearer {jwt}", "Content-Type": "application/json"}
+    url = f"{BASE}/{CARTOES_ENDPOINT}"
+    pagina, total, saida = 1, 1, []
+    while pagina <= total:
+        params = {"pagina": pagina, "tipo": tipo, "inicio": ini.strftime("%Y-%m-%d"), "fim": fim.strftime("%Y-%m-%d"), "tipoDatas": tipo_datas, "status": "Todos"}
+        if cnpjs: params["empresas"] = ",".join(cnpjs)
+        
+        r = requests.get(url, headers=headers, params=params, timeout=60)
+        if r.status_code != 200: break
+        corpo = r.json()
+        if isinstance(corpo, dict) and corpo.get("Ok") is False: break
+        
+        res = corpo.get("Result") if isinstance(corpo, dict) else corpo
+        if isinstance(res, dict):
+            itens = res.get("Parcelas") or []
+            total = res.get("QuantidadeDePaginas", 1) or 1
+        else:
+            itens, total = (res or []), 1
+            
+        saida.extend(itens)
+        pagina += 1
+    return saida
+
 def buscar_cartoes_f360(jwt, d_ini, d_fim, mapa_cnpj, log=None):
     cnpjs = [_fmt_cnpj(c) for c in mapa_cnpj]
     registros, vistos = [], set()
     for td in ("Vencimento", "Liquidação"):
         for ini, fim in _janelas(d_ini - timedelta(days=30), d_fim):
-            headers, url = {"Authorization": f"Bearer {jwt}", "Content-Type": "application/json"}, f"{BASE}/{CARTOES_ENDPOINT}"
-            params = {"pagina": 1, "tipo": "Receita", "inicio": ini.isoformat(), "fim": fim.isoformat(), "tipoDatas": td, "status": "Todos"}
-            if cnpjs: params["empresas"] = ",".join(cnpjs)
-            while True:
-                r = requests.get(url, headers=headers, params=params, timeout=60)
-                if r.status_code != 200: break
-                res = r.json().get("Result") if isinstance(r.json(), dict) else {}
-                itens = res.get("Parcelas", []) if isinstance(res, dict) else res
-                for it in itens:
-                    chave = str(it.get("ParcelaId") or json.dumps(it, sort_keys=True, default=str))
-                    if td == "Vencimento" or chave not in vistos:
-                        registros.append(it)
-                        vistos.add(chave)
-                if params["pagina"] >= (res.get("QuantidadeDePaginas", 1) if isinstance(res, dict) else 1): break
-                params["pagina"] += 1
+            itens = _listar_cartoes_api(jwt, "Receita", ini, fim, td, cnpjs)
+            # FALLBACK DE SEGURANÇA
+            if not itens and cnpjs:
+                itens = _listar_cartoes_api(jwt, "Receita", ini, fim, td, [])
+                
+            for it in itens:
+                chave = str(it.get("ParcelaId") or json.dumps(it, sort_keys=True, default=str))
+                if td == "Vencimento" or chave not in vistos:
+                    registros.append(it)
+                    vistos.add(chave)
     return _normaliza_cartoes(registros, mapa_cnpj)
 
 def buscar_parcelas_f360(jwt, d_ini, d_fim, mapa_cnpj, tipo="Despesa", incluir_liquidacao=True, log=None):
     cnpjs = [_fmt_cnpj(c) for c in mapa_cnpj]
     digitos_cnpj = {_so_digitos(c) for c in mapa_cnpj}
     unicas = {}
+    
     for td in (["Vencimento", "Liquidação"] if incluir_liquidacao else ["Vencimento"]):
         for ini, fim in _janelas(d_ini, d_fim):
             itens = _listar_titulos(jwt, tipo, ini, fim, td, cnpjs)
-            # FALLBACK DE SEGURANÇA: Se a API F360 falhar e retornar 0 itens na filtragem, busca tudo e filtra manualmente.
+            # FALLBACK DE SEGURANÇA
             if not itens:
                 todos = _listar_titulos(jwt, tipo, ini, fim, td, [])
                 itens = [p for p in todos if _da_rede(p, digitos_cnpj)]
@@ -218,6 +265,9 @@ def buscar_parcelas_f360(jwt, d_ini, d_fim, mapa_cnpj, tipo="Despesa", incluir_l
         return pd.concat(partes, ignore_index=True) if partes else pd.DataFrame()
     return df_titulos
 
+# ==========================================
+# EXCEL OFICIAL F360
+# ==========================================
 def processar_fluxo_de_caixa_oficial(arquivo):
     df_raw = pd.read_excel(arquivo, header=1)
     saldo_inicial = _num(df_raw.iloc[0]['Saldo']) if not df_raw.empty and "Saldo Inicial" in str(df_raw.iloc[0, 0]) else 0.0
