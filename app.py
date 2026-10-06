@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, date, timedelta
 
+# IMPORTAÇÃO DO MÓDULO F360
 from f360_api import (
     autenticar_f360, 
     buscar_parcelas_f360,
@@ -47,7 +48,7 @@ with st.sidebar:
     st.header("⚡ Sincronização API (DRE)")
     if "jwt" not in st.session_state: st.session_state.jwt = autenticar_f360(F360_TOKEN)
     
-    periodo_api = st.date_input("Período DRE (API)", (date(2026, 9, 1), date(2026, 9, 30)), format="DD/MM/YYYY")
+    periodo_api = st.date_input("Período DRE (API)", (date(2026, 9, 1), date(2026, 10, 31)), format="DD/MM/YYYY")
     if st.button("🚀 Sincronizar API para DRE", use_container_width=True) and len(periodo_api) == 2:
         with st.spinner("Sincronizando DRE..."):
             d_ini, d_fim = periodo_api[0].replace(day=1), periodo_api[1]
@@ -69,16 +70,24 @@ with st.sidebar:
 if 'filtro_kpi' not in st.session_state: st.session_state.filtro_kpi = "PENDENTE"
 fluxo_oficial = carregar_fluxo_oficial(file_fluxo_oficial) if file_fluxo_oficial else {}
 
-# === CORREÇÃO DO ERRO APLICADA AQUI ===
 _lista_dfs = [d for d in [st.session_state.get("df_api_desp"), st.session_state.get("df_api_rec")] if d is not None and not d.empty]
 df_api = pd.concat(_lista_dfs, ignore_index=True) if _lista_dfs else pd.DataFrame()
-# ========================================
 
 col1, col2 = st.columns([2, 1])
-with col1: conta_selecionada = st.radio("Conta:", ["Ver Todas as Contas", "17 Pantanal Itaú", "51 Estação Itaú", "61 Itaú Goiabeiras", "52 RT", "36 MJL"], horizontal=True)
+with col1: conta_selecionada = st.radio("Conta / Loja:", ["Ver Todas as Contas", "17 Pantanal Itaú", "51 Estação Itaú", "61 Itaú Goiabeiras", "52 RT", "36 MJL"], horizontal=True)
 with col2:
-    min_d, max_d = date(2026, 9, 1), date(2026, 9, 30)
-    if not df_api.empty: min_d, max_d = df_api['Vencimento_dt'].min().date(), df_api['Vencimento_dt'].max().date()
+    min_d, max_d = date(2026, 9, 1), date(2026, 10, 31)
+    
+    # === CORREÇÃO 1: AMPLIA OS LIMITES DE DATA COM BASE NO EXCEL OFICIAL ===
+    if not df_api.empty: 
+        min_d = df_api['Vencimento_dt'].min().date()
+        max_d = df_api['Vencimento_dt'].max().date()
+        
+    for dados in fluxo_oficial.values():
+        if not dados["df"].empty:
+            min_d = min(min_d, dados["df"]["Data"].min().date())
+            max_d = max(max_d, dados["df"]["Data"].max().date())
+            
     date_range = st.date_input("Filtro de Tela:", value=(min_d, max_d), format="DD/MM/YYYY")
 
 df_kpi = df_api.copy()
@@ -100,13 +109,13 @@ if not df_desp_kpi.empty:
 
 st.divider()
 k1, k2, k3, k4 = st.columns(4)
-with k1: st.button(f"📊 PREVISTAS\nR$ {tot_prev:,.2f}", use_container_width=True)
-with k2: st.button(f"🟢 LIQUIDADAS\nR$ {tot_real:,.2f}", use_container_width=True)
-with k3: st.button(f"🔴 EM ABERTO\nR$ {tot_pend:,.2f}", use_container_width=True)
-with k4: st.metric("Receita Líquida (API)", f"R$ {tot_rec_prev:,.2f}", delta=f"Realizado: R$ {tot_rec_real:,.2f}")
+with k1: st.button(f"📊 DESPESAS PREVISTAS\nR$ {tot_prev:,.2f}", use_container_width=True)
+with k2: st.button(f"🟢 DESPESAS LIQUIDADAS\nR$ {tot_real:,.2f}", use_container_width=True)
+with k3: st.button(f"🔴 DESPESAS EM ABERTO\nR$ {tot_pend:,.2f}", use_container_width=True)
+with k4: st.metric("Receita Líquida Títulos (API)", f"R$ {tot_rec_prev:,.2f}", delta=f"Realizado: R$ {tot_rec_real:,.2f}")
 
 st.markdown("<br>", unsafe_allow_html=True)
-tab1, tab2, tab3 = st.tabs(["📅 Fluxo Diário (Fonte Excel F360)", "📋 DRE de Caixa (Fonte API)", "🏪 Comparativo Por Conta"])
+tab1, tab2, tab3 = st.tabs(["📅 Fluxo Diário (Fonte Excel F360)", "📋 DRE de Caixa (Fonte API)", "🏪 Comparativo Por Loja"])
 
 with tab1:
     st.subheader("Matriz Diária - Valores 100% Espelhados do F360")
@@ -148,10 +157,43 @@ with tab2:
         st.dataframe(pd.DataFrame(dre_list), use_container_width=True, hide_index=True)
     else: st.warning("Sincronize a API no menu lateral para visualizar o DRE.")
 
+# === CORREÇÃO 2: COMPARATIVO POR LOJA ===
 with tab3:
-    st.subheader("Matriz Comparativa por Conta Bancária")
-    if not df_desp_kpi.empty:
-        pivot_store = df_desp_kpi.pivot_table(index='Categoria_CFO', columns='Empresa', values='Valor', aggfunc='sum', fill_value=0)
-        st.dataframe(pivot_store.style.format("R$ {:,.2f}"), use_container_width=True)
+    st.subheader("Comparativo Por Loja (Vendas e Despesas)")
+    
+    if not df_api.empty:
+        df_filtered_loja = df_api.copy()
+        if isinstance(date_range, tuple) and len(date_range) == 2: 
+            df_filtered_loja = df_filtered_loja[(df_filtered_loja['Vencimento_dt'].dt.date >= date_range[0]) & (df_filtered_loja['Vencimento_dt'].dt.date <= date_range[1])]
+
+        tem_loja = ('Empresa_Loja' in df_filtered_loja.columns and df_filtered_loja['Empresa_Loja'].replace('', np.nan).notna().any())
+        
+        if not tem_loja:
+            st.warning("Sem dado de loja de origem nos lançamentos carregados. Mostrando por conta bancária de liquidação como alternativa.")
+            dimensao = 'Empresa'
+        else:
+            dimensao = 'Empresa_Loja'
+            
+        df_desp_loja = df_filtered_loja[(df_filtered_loja['Tipo_Movimento'] == 'DESPESA') & (df_filtered_loja['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")]
+        df_desp_loja = df_desp_loja[df_desp_loja[dimensao].replace('', 'N/D') != ''].copy() if not df_desp_loja.empty else pd.DataFrame()
+        
+        df_rec_loja = df_filtered_loja[(df_filtered_loja['Tipo_Movimento'] == 'RECEITA') & (df_filtered_loja['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")]
+        df_rec_loja = df_rec_loja[df_rec_loja[dimensao].replace('', 'N/D') != ''].copy() if not df_rec_loja.empty else pd.DataFrame()
+        
+        if not df_desp_loja.empty:
+            st.markdown("**Despesas por categoria**")
+            pivot_desp = df_desp_loja.pivot_table(index='Categoria_CFO', columns=dimensao, values='Valor', aggfunc='sum', fill_value=0)
+            st.dataframe(pivot_desp.style.format("R$ {:,.2f}"), use_container_width=True)
+            
+        if not df_rec_loja.empty:
+            st.markdown("**Resumo Operacional (Receita x Despesa)**")
+            resumo_rec = df_rec_loja.groupby(dimensao)['Valor'].sum().to_frame("Receita de Vendas")
+            resumo_desp = df_desp_loja.groupby(dimensao)['Valor'].sum().to_frame("Despesas") if not df_desp_loja.empty else pd.DataFrame()
+            resumo = resumo_rec.join(resumo_desp, how='outer').fillna(0)
+            resumo["Resultado (Receita - Despesa)"] = resumo["Receita de Vendas"] - resumo.get("Despesas", 0)
+            st.dataframe(resumo.style.format("R$ {:,.2f}"), use_container_width=True)
+            
+        if df_desp_loja.empty and df_rec_loja.empty:
+            st.info("Nenhum lançamento com loja identificada para comparar no período selecionado.")
     else:
-        st.warning("Sincronize a API para gerar o comparativo entre as contas.")
+        st.warning("Sincronize a API para gerar o comparativo entre as lojas.")
