@@ -264,6 +264,196 @@ def highlight_saldo(row):
 def brl(v):
     return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
+def _preparar_titulos_detalhe(df, status=None):
+    """Prepara os títulos que serão exibidos no painel de detalhes."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    d = df.copy()
+
+    if status == "REALIZADO":
+        d = d[d["Status_Clean"].astype(str).str.upper() == "REALIZADO"]
+    elif status == "PENDENTE":
+        d = d[d["Status_Clean"].astype(str).str.upper() == "PENDENTE"]
+
+    colunas_preferidas = [
+        "Vencimento_dt", "Empresa", "Empresa_Loja",
+        "Cliente/Fornecedor", "Cliente", "Fornecedor",
+        "Plano de Contas", "Categoria_CFO", "Valor",
+        "Status_Clean", "Status", "Data_Liquidacao"
+    ]
+
+    colunas = [c for c in colunas_preferidas if c in d.columns]
+
+    # Mantém também eventuais identificadores úteis do lançamento.
+    for c in d.columns:
+        if c not in colunas and any(k in str(c).lower() for k in [
+            "titulo", "documento", "parcela", "id", "descrição", "descricao"
+        ]):
+            colunas.append(c)
+
+    if not colunas:
+        return d
+
+    d = d[colunas].copy()
+
+    # O F360 pode trazer colunas com nomes que acabam ficando repetidos
+    # depois dos renames (por exemplo, Status + Status_Clean). O
+    # st.dataframe/pyarrow não aceita DataFrames com nomes duplicados.
+    # Primeiro eliminamos duplicidades literais mantendo a primeira coluna.
+    d = d.loc[:, ~d.columns.duplicated(keep="first")].copy()
+
+    if "Vencimento_dt" in d.columns:
+        d["Vencimento"] = pd.to_datetime(
+            d["Vencimento_dt"], errors="coerce"
+        ).dt.strftime("%d/%m/%Y")
+        d = d.drop(columns=["Vencimento_dt"])
+
+    if "Data_Liquidacao" in d.columns:
+        d["Liquidação"] = pd.to_datetime(
+            d["Data_Liquidacao"], errors="coerce"
+        ).dt.strftime("%d/%m/%Y")
+
+    if "Valor" in d.columns:
+        d["Valor"] = pd.to_numeric(d["Valor"], errors="coerce").fillna(0)
+
+    rename = {
+        "Empresa_Loja": "Loja",
+        "Cliente/Fornecedor": "Cliente / Fornecedor",
+        "Plano de Contas": "Plano de Contas",
+        "Status_Clean": "Status",
+    }
+    d = d.rename(columns=rename)
+
+    # Depois do rename pode surgir uma nova duplicidade, por exemplo se
+    # o F360 já possuir uma coluna chamada "Status". Resolve novamente.
+    d = d.loc[:, ~d.columns.duplicated(keep="first")].copy()
+
+    # Segurança adicional: nomes únicos para qualquer combinação de
+    # colunas inesperada que venha da API.
+    nomes = []
+    contagem = {}
+    for nome in d.columns:
+        nome = str(nome)
+        if nome not in contagem:
+            contagem[nome] = 0
+            nomes.append(nome)
+        else:
+            contagem[nome] += 1
+            nomes.append(f"{nome}_{contagem[nome]}")
+    d.columns = nomes
+
+    return d
+
+
+def render_movement_cards(
+    previsto,
+    liquidado,
+    aberto,
+    titulo="Lançamentos",
+    df_detail=None,
+    state_prefix="mov"
+):
+    """Cards clicáveis + caixa de títulos com botão Fechar."""
+    c1, c2, c3 = st.columns(3)
+
+    cards = [
+        (c1, "PREVISTO", previsto, "kpi-blue", "Todos os títulos do período", "ALL"),
+        (c2, "LIQUIDADO", liquidado, "kpi-green", "Valores já realizados", "REALIZADO"),
+        (
+            c3,
+            "EM ABERTO",
+            aberto,
+            "kpi-yellow" if aberto > 0 else "kpi-green",
+            "Previsto ainda não liquidado",
+            "PENDENTE",
+        ),
+    ]
+
+    for col, label, value, color_class, foot, status in cards:
+        with col:
+            st.markdown(f"""
+            <div class="kpi-card">
+                <div class="kpi-label">
+                    {"📊" if status == "ALL" else "🟢" if status == "REALIZADO" else "🟡"}
+                    {titulo} · {label}
+                </div>
+                <div class="kpi-value {color_class}">{brl(value)}</div>
+                <div class="kpi-foot">{foot}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # O botão fica imediatamente abaixo do card e dispara o painel.
+            if st.button(
+                f"Ver títulos · {label}",
+                key=f"{state_prefix}_{status}",
+                use_container_width=True
+            ):
+                st.session_state.show_kpi_data = f"{state_prefix}:{status}"
+
+    # O painel é renderizado depois dos três cards, evitando que um botão
+    # desapareça ou seja sobrescrito por outro rerun.
+    current = st.session_state.get("show_kpi_data")
+
+    if current and current.startswith(f"{state_prefix}:"):
+        status = current.split(":", 1)[1]
+        df_show = _preparar_titulos_detalhe(
+            df_detail,
+            None if status == "ALL" else status
+        )
+
+        st.markdown("""
+        <div style="
+            background:#11161D;
+            border:1px solid #303A46;
+            border-radius:12px;
+            padding:16px;
+            margin:14px 0 18px 0;
+        ">
+        """, unsafe_allow_html=True)
+
+        h1, h2 = st.columns([5, 1])
+        with h1:
+            nomes = {
+                "ALL": "Todos os títulos",
+                "REALIZADO": "Títulos liquidados",
+                "PENDENTE": "Títulos em aberto",
+            }
+            st.markdown(
+                f"### 📋 {titulo} · {nomes.get(status, status)}"
+            )
+        with h2:
+            if st.button(
+                "✕ Fechar",
+                key=f"{state_prefix}_close",
+                use_container_width=True
+            ):
+                st.session_state.show_kpi_data = None
+                st.rerun()
+
+        if df_show.empty:
+            st.info("Nenhum título encontrado para este status no período/loja selecionados.")
+        else:
+            if "Valor" in df_show.columns:
+                total = df_show["Valor"].sum()
+                st.caption(
+                    f"{len(df_show):,} título(s) · Total: {brl(total)}"
+                    .replace(",", ".")
+                )
+                st.dataframe(
+                    df_show.style.format({"Valor": "R$ {:,.2f}"}),
+                    use_container_width=True,
+                    hide_index=True
+                )
+            else:
+                st.dataframe(
+                    df_show,
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
 # ============================================================
 # ESTADO
 # ============================================================
@@ -588,8 +778,19 @@ with tabs[0]:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
+    # Legenda operacional
+    st.markdown("""
+    <div class="panel" style="padding:10px 14px;">
+        <span class="muted">
+            <b style="color:#69B7FF;">PREVISTO</b> = lançamentos previstos ·
+            <b style="color:#45D483;">LIQUIDADO</b> = realizado ·
+            <b style="color:#F4C95D;">EM ABERTO</b> = ainda pendente
+        </span>
+    </div>
+    """, unsafe_allow_html=True)
+
     # GRÁFICO ENTRADAS X SAÍDAS
-    g1, g2 = st.columns([1.7, 1])
+    g1, g2 = st.columns([1.75, 1])
 
     with g1:
         st.markdown("""
@@ -711,6 +912,7 @@ with tabs[0]:
 with tabs[1]:
     st.subheader("Matriz Diária — Valores 100% Espelhados do F360")
 
+    # Cards operacionais: previsto, liquidado e em aberto
     oficial = (
         fluxo_oficial.get(conta_selecionada)
         or fluxo_oficial.get("Ver Todas as Contas")
@@ -718,6 +920,78 @@ with tabs[1]:
     )
     if not oficial and len(fluxo_oficial) == 1:
         oficial = list(fluxo_oficial.values())[0]
+
+    if oficial:
+        df_cards = oficial["df"].copy()
+
+        if isinstance(date_range, tuple) and len(date_range) == 2:
+            df_cards = df_cards[
+                (df_cards["Data"].dt.date >= date_range[0]) &
+                (df_cards["Data"].dt.date <= date_range[1])
+            ]
+
+        # O Excel oficial traz Total_Entradas e Total_Saidas.
+        # Para os cards de lançamentos, cruzamos com a API quando disponível:
+        # previsto = API; liquidado = REALIZADO; aberto = PENDENTE.
+        if not df_api.empty:
+            df_cards_api = df_api.copy()
+            if isinstance(date_range, tuple) and len(date_range) == 2:
+                df_cards_api = df_cards_api[
+                    (df_cards_api["Vencimento_dt"].dt.date >= date_range[0]) &
+                    (df_cards_api["Vencimento_dt"].dt.date <= date_range[1])
+                ]
+
+            if conta_selecionada not in ("Ver Todas as Contas", "CSV (via navegador)"):
+                df_cards_api = df_cards_api[df_cards_api["Empresa"] == conta_selecionada]
+
+            # Despesas são as que têm os três estados de lançamento mais relevantes.
+            desp_cards = df_cards_api[
+                (df_cards_api["Tipo_Movimento"] == "DESPESA") &
+                (df_cards_api["Categoria_CFO"] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")
+            ]
+
+            prev_cards = desp_cards["Valor"].sum() if not desp_cards.empty else 0.0
+            liq_cards = (
+                desp_cards[desp_cards["Status_Clean"] == "REALIZADO"]["Valor"].sum()
+                if not desp_cards.empty else 0.0
+            )
+            aberto_cards = (
+                desp_cards[desp_cards["Status_Clean"] == "PENDENTE"]["Valor"].sum()
+                if not desp_cards.empty else max(prev_cards - liq_cards, 0)
+            )
+
+            st.markdown("#### Lançamentos do período")
+            render_movement_cards(
+                prev_cards,
+                liq_cards,
+                aberto_cards,
+                "Despesas",
+                df_detail=desp_cards,
+                state_prefix="fluxo_despesas"
+            )
+
+            st.caption(
+                "Previsto = todos os lançamentos de despesa; "
+                "Liquidado = status REALIZADO; Em aberto = status PENDENTE."
+            )
+            st.markdown("<br>", unsafe_allow_html=True)
+        else:
+            # Fallback visual quando somente o Excel oficial estiver carregado.
+            entradas = df_cards["Total_Entradas"].sum() if not df_cards.empty else 0.0
+            saidas = df_cards["Total_Saidas"].sum() if not df_cards.empty else 0.0
+            st.markdown("#### Movimentação oficial do caixa")
+            render_movement_cards(
+                saidas,
+                saidas,
+                0.0,
+                "Saídas",
+                df_detail=None,
+                state_prefix="fluxo_oficial"
+            )
+            st.caption("Para separar previsto, liquidado e em aberto, sincronize a API F360.")
+            st.markdown("<br>", unsafe_allow_html=True)
+    else:
+        st.info("👈 Anexe o 'Fluxo de Caixa.xlsx' para habilitar os indicadores do fluxo diário.")
 
     if oficial:
         df_of = oficial["df"].copy()
@@ -760,6 +1034,59 @@ with tabs[2]:
     st.subheader("DRE de Caixa — Visão Gerencial por Plano de Contas")
 
     if not df_api.empty:
+        # Cards da DRE: mostram claramente o volume lançado e o status.
+        st.markdown("#### Lançamentos da DRE")
+
+        rec_prev_dre = (
+            df_rec_kpi["Valor"].sum()
+            if not df_rec_kpi.empty else 0.0
+        )
+        rec_liq_dre = (
+            df_rec_kpi[df_rec_kpi["Status_Clean"] == "REALIZADO"]["Valor"].sum()
+            if not df_rec_kpi.empty else 0.0
+        )
+        rec_aberto_dre = (
+            df_rec_kpi[df_rec_kpi["Status_Clean"] == "PENDENTE"]["Valor"].sum()
+            if not df_rec_kpi.empty else max(rec_prev_dre - rec_liq_dre, 0)
+        )
+
+        desp_prev_dre = (
+            df_desp_kpi["Valor"].sum()
+            if not df_desp_kpi.empty else 0.0
+        )
+        desp_liq_dre = (
+            df_desp_kpi[df_desp_kpi["Status_Clean"] == "REALIZADO"]["Valor"].sum()
+            if not df_desp_kpi.empty else 0.0
+        )
+        desp_aberto_dre = (
+            df_desp_kpi[df_desp_kpi["Status_Clean"] == "PENDENTE"]["Valor"].sum()
+            if not df_desp_kpi.empty else max(desp_prev_dre - desp_liq_dre, 0)
+        )
+
+        render_movement_cards(
+            rec_prev_dre,
+            rec_liq_dre,
+            rec_aberto_dre,
+            "Receitas",
+            df_detail=df_rec_kpi,
+            state_prefix="dre_receitas"
+        )
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        render_movement_cards(
+            desp_prev_dre,
+            desp_liq_dre,
+            desp_aberto_dre,
+            "Despesas",
+            df_detail=df_desp_kpi,
+            state_prefix="dre_despesas"
+        )
+
+        st.caption(
+            "Os cards usam os lançamentos da API F360 respeitando a conta/loja e o período selecionados."
+        )
+        st.markdown("<br>", unsafe_allow_html=True)
         dre_list = [{
             "Categoria CFO": "0. RECEITAS DE VENDAS",
             "Previsto (R$)": f"R$ {tot_rec_prev:,.2f}",
