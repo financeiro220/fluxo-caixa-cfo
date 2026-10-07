@@ -202,10 +202,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-try:
-    F360_TOKEN = st.secrets["F360_TOKEN"]
-except:
-    F360_TOKEN = "11001cbb-792d-45e5-b2f9-03ffc46fe7ed"
+# FIX: Forçando o uso da chave garantida!
+F360_TOKEN = "11001cbb-792d-45e5-b2f9-03ffc46fe7ed"
 
 MAPA_CNPJ_LOJA = {
     "36240923000168": "4- PANTANAL",
