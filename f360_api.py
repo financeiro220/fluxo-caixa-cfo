@@ -2,7 +2,7 @@
 f360_api.py - Integração com a API pública do F360.
 Solução para vendas de Cartões/iFood de meses anteriores que liquidam no mês atual (ex: Venda em Agosto, Liquidação em Setembro).
 
-Correção: respeita o Status da parcela para distinguir Liquidado de Agendado.
+Correção: O campo de liquidação é usado como data de caixa/agendamento, mas o status REALIZADO só é dado se o F360 confirmar a liquidação.
 """
 import json
 import re
@@ -102,10 +102,6 @@ EMPRESA_CONTA_PADRAO = {
 }
 
 def _mapear_conta_para_loja(conta_str, empresa_nome=None):
-    """Identifica a conta bancária pelo texto da conta. Um título pendente
-    (ainda não pago) costuma vir com Conta vazia -- antes isso caía todo
-    em '17 Pantanal Itaú' por padrão, inflando essa conta e zerando as
-    outras. Agora, sem conta, usa a conta padrão da EMPRESA do título."""
     c = str(conta_str or "").strip()
     c_upper = c.upper()
 
@@ -171,16 +167,9 @@ def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
         tit = p.get("DadosDoTitulo") or {}
         fornecedor = (tit.get("ClienteFornecedor") or {}).get("Nome", "") or ""
         
-        status_explicitamente_realizado = ("liquidado" in s_low or "conciliado" in s_low)
-        status_agendado = "agendado" in s_low
-        
-        if status.strip():
-            realizado = status_explicitamente_realizado
-        else:
-            realizado = pd.notna(p.get("Liquidacao"))
-            
-        if status_agendado:
-            realizado = False
+        # Só é dado como REALIZADO se a palavra liquidado ou conciliado existir no status.
+        # Falso positivo de agendamentos resolvido!
+        realizado = ("liquidado" in s_low or "conciliado" in s_low)
             
         bruto = float(p.get("ValorBruto") or 0)
         conta_raw = str(p.get("Conta") or "")
@@ -231,12 +220,12 @@ def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
     df["Vencimento_real"] = pd.to_datetime(df["Vencimento_real"], errors="coerce")
     df["Liquidacao_dt"] = pd.to_datetime(df["Liquidacao_dt"], errors="coerce")
 
-    # FIX: Só joga o título para a data de Liquidação se ele realmente foi PAGO (REALIZADO).
-    # Caso contrário, mantém-se na data de Vencimento original para não sumir do dashboard.
-    df["Vencimento_dt"] = df["Vencimento_real"]
-    is_realizado = df["Status_Clean"] == "REALIZADO"
-    mascara_liq = is_realizado & df["Liquidacao_dt"].notna()
-    df.loc[mascara_liq, "Vencimento_dt"] = df.loc[mascara_liq, "Liquidacao_dt"]
+    # FIX CRÍTICO: Sempre usa a data de Liquidação como "Data Caixa/Previsão".
+    # Se não houver liquidação nem agendamento, aí sim cai no vencimento original.
+    df["Vencimento_dt"] = df["Liquidacao_dt"].where(
+        df["Liquidacao_dt"].notna(),
+        df["Vencimento_real"]
+    )
 
     df = df.dropna(subset=["Vencimento_dt"]).copy()
     df["Dia"] = df["Vencimento_dt"].dt.day
@@ -257,7 +246,7 @@ _ALIAS = {
     "liquidacao": ["liquid", "liquidacao", "dataliquidacao"],
     "id": ["id", "parcelaid", "cartaoid"],
     "modalidade": ["modalidade"],
-    "status": ["status", "statusdaparcela", "situacao"], # Novo mapeamento para ler o Status real do F360
+    "status": ["status", "statusdaparcela", "situacao"],
 }
 
 def _k(s):
@@ -303,7 +292,6 @@ def _normaliza_cartoes(registros, mapa_cnpj):
         v_liq = _pega(reg, "liquido")
         liquido = _num(v_liq) if v_liq is not None else bruto
         
-        # FIX: Agora checa explicitamente o status oficial do cartão no F360, e não apenas se tem data de liquidação
         status_raw = str(_pega(reg, "status") or "").strip()
         realizado = "liquidado" in status_raw.lower() or "conciliado" in status_raw.lower()
 
@@ -334,11 +322,8 @@ def _normaliza_cartoes(registros, mapa_cnpj):
     for c in ("Data_Venda", "Vencimento_real", "Liquidacao_dt"):
         df[c] = pd.to_datetime(df[c], errors="coerce")
 
-    # FIX: Respeita Vencimento se Pendente, joga para Liquidação se Realizado
-    df["Vencimento_dt"] = df["Vencimento_real"]
-    is_realizado = df["Status_Clean"] == "REALIZADO"
-    mascara_liq = is_realizado & df["Liquidacao_dt"].notna()
-    df.loc[mascara_liq, "Vencimento_dt"] = df.loc[mascara_liq, "Liquidacao_dt"]
+    # Para cartões, a data da previsão de caixa também é o campo de liquidação
+    df["Vencimento_dt"] = df["Liquidacao_dt"].where(df["Liquidacao_dt"].notna(), df["Vencimento_real"])
 
     df = df.dropna(subset=["Vencimento_dt"]).copy()
     df["Dia"] = df["Vencimento_dt"].dt.day
@@ -370,7 +355,6 @@ def _listar_cartoes_api(jwt, tipo, ini, fim, tipo_datas, cnpjs):
     return saida
 
 def buscar_cartoes_f360(jwt, d_ini, d_fim, mapa_cnpj, log=None):
-    """Busca cartões expandindo a busca para 30 dias antes (vendas retroativas de agosto que liquidaram em setembro)."""
     log = log if log is not None else []
     cnpjs = [_fmt_cnpj(c) for c in mapa_cnpj]
 
