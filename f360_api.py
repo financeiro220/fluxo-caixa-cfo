@@ -1,6 +1,7 @@
 """
 f360_api.py - Integração com a API pública do F360.
-Solução para vendas de Cartões/iFood de meses anteriores que liquidam no mês atual (ex: Venda em Agosto, Liquidação em Setembro).\n\nCorreção: respeita o Status da parcela para distinguir Liquidado de Agendado.
+Solução para vendas de Cartões/iFood de meses anteriores que liquidam no mês atual.
+INCLUI TELA DE DIAGNÓSTICO DE LOGS PARA O STREAMLIT.
 """
 import json
 import re
@@ -99,12 +100,7 @@ EMPRESA_CONTA_PADRAO = {
     "8 - GOIABEIRAS": "61 Itaú Goiabeiras",
 }
 
-
 def _mapear_conta_para_loja(conta_str, empresa_nome=None):
-    """Identifica a conta bancária pelo texto da conta. Um título pendente
-    (ainda não pago) costuma vir com Conta vazia -- antes isso caía todo
-    em '17 Pantanal Itaú' por padrão, inflando essa conta e zerando as
-    outras. Agora, sem conta, usa a conta padrão da EMPRESA do título."""
     c = str(conta_str or "").strip()
     c_upper = c.upper()
 
@@ -161,47 +157,28 @@ def _da_rede(p, digitos):
 def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
     mapa = {_so_digitos(k): v for k, v in mapa_cnpj.items()}
     linhas = []
+    ignorados = [] # LOG PARA DIAGNÓSTICO
+    
     for p in parcelas:
         status = str(p.get("Status", ""))
         s_low = status.lower()
+        
+        # Vamos manter o log do que está sendo cancelado/baixado
         if p.get("Cancelada") or "cancelad" in s_low or "baixad" in s_low:
+            ignorados.append(f"ID:{p.get('ParcelaId')} | Status:{status} | R$ {p.get('ValorBruto')}")
             continue
 
         tit = p.get("DadosDoTitulo") or {}
         fornecedor = (tit.get("ClienteFornecedor") or {}).get("Nome", "") or ""
-        # O F360 possui status distintos para ABERTO, AGENDADO e LIQUIDADO.
-        # A existência de uma data em "Liquidacao" NÃO significa, sozinha,
-        # que o dinheiro já saiu do caixa: títulos agendados podem trazer uma
-        # data futura nesse campo.
-        #
-        # Para o CFO, a regra é:
-        #   - ABERTO/AGENDADO/PENDENTE -> PENDENTE
-        #   - LIQUIDADO/CONCILIADO -> REALIZADO
-        #   - liquidação futura -> nunca pode ser REALIZADO hoje
-        #
-        # A API oficial lista "Agendado" separadamente de "Liquidado".
-        # IMPORTANTE: não usamos "liquidado" por substring, porque existem
-        # status como "LiquidadoPendente" e "Não Liquidado". O status oficial
-        # precisa ser interpretado de forma conservadora.
-        status_txt = unicodedata.normalize(
-            "NFKD", status.strip().lower()
-        ).encode("ascii", "ignore").decode()
+        
+        status_txt = unicodedata.normalize("NFKD", status.strip().lower()).encode("ascii", "ignore").decode()
         status_compacto = re.sub(r"[^a-z0-9]", "", status_txt)
 
-        # Estados que NÃO representam dinheiro efetivamente realizado.
         status_pendente = (
             status_compacto in {
-                "agendado",
-                "aberto",
-                "abertoavencer",
-                "abertovencidos",
-                "aprovado",
-                "pendente",
-                "pendentesdeaprovacao",
-                "renegociado",
-                "naovinculadocomdda",
-                "liquidadopendente",
-                "naoliquidado",
+                "agendado", "aberto", "abertoavencer", "abertovencidos", "aprovado",
+                "pendente", "pendentesdeaprovacao", "renegociado", "naovinculadocomdda",
+                "liquidadopendente", "naoliquidado",
             }
             or status_compacto.startswith("aberto")
             or status_compacto.startswith("agendado")
@@ -209,13 +186,8 @@ def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
             or status_compacto.startswith("liquidadopendente")
         )
 
-        # Somente estes estados são tratados como dinheiro efetivamente
-        # liquidado/conciliado. "LiquidadoPendente" fica fora.
         status_realizado = status_compacto in {
-            "liquidado",
-            "liquidadoall",
-            "liquidadoconciliado",
-            "conciliado",
+            "liquidado", "liquidadoall", "liquidadoconciliado", "conciliado",
         }
 
         liquidacao_dt_raw = _data(p.get("Liquidacao"))
@@ -224,20 +196,10 @@ def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
         if status_pendente:
             realizado = False
         elif status_realizado:
-            # Mesmo que o F360 envie uma data futura, ela não pode ser
-            # considerada caixa realizado antes do dia chegar.
-            realizado = bool(
-                pd.notna(liquidacao_dt_raw)
-                and liquidacao_dt_raw.normalize() <= hoje
-            )
+            realizado = bool(pd.notna(liquidacao_dt_raw) and liquidacao_dt_raw.normalize() <= hoje)
         else:
-            # Se o F360 não informou status, mantemos a regra conservadora:
-            # só considera realizado se houver liquidação não futura.
-            realizado = bool(
-                not status.strip()
-                and pd.notna(liquidacao_dt_raw)
-                and liquidacao_dt_raw.normalize() <= hoje
-            )
+            realizado = bool(not status.strip() and pd.notna(liquidacao_dt_raw) and liquidacao_dt_raw.normalize() <= hoje)
+            
         bruto = float(p.get("ValorBruto") or 0)
         conta_raw = str(p.get("Conta") or "")
         cnpj = _so_digitos((tit.get("Empresa") or {}).get("Inscricao"))
@@ -270,7 +232,6 @@ def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
                 "Plano de Contas": r.get("PlanoDeContas") or "Outros",
                 "Valor": bruto * peso,
                 "Valor_Bruto": bruto * peso,
-                "Status": status,
                 "Status_F360": status,
                 "Status_Clean": "REALIZADO" if realizado else "PENDENTE",
                 "Vencimento_real": p.get("Vencimento"),
@@ -287,24 +248,37 @@ def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
     df["Vencimento_real"] = pd.to_datetime(df["Vencimento_real"], errors="coerce")
     df["Liquidacao_dt"] = pd.to_datetime(df["Liquidacao_dt"], errors="coerce")
 
-    # DATA USADA PELO FLUXO DE CAIXA:
-    # A coluna "Liquidacao" do F360 representa a data em que o valor está
-    # previsto/agenda para movimentar o caixa. Portanto, ela deve ser usada
-    # para POSICIONAR o título no calendário mesmo quando o status ainda é
-    # PENDENTE/AGENDADO.
-    #
-    # O STATUS é tratado separadamente acima e continua dizendo se o valor já
-    # foi realizado ou ainda está em aberto.
-    #
-    # Assim:
-    #   - Agendado + Liquidação 01/10 -> aparece em 01/10 como EM ABERTO
-    #   - Agendado + Liquidação 09/10 -> aparece em 09/10 como EM ABERTO
-    #   - Liquidado + Liquidação 09/10 -> aparece em 09/10 como LIQUIDADO
-    #   - sem Liquidação -> usa o Vencimento.
     df["Vencimento_dt"] = df["Liquidacao_dt"].where(
         df["Liquidacao_dt"].notna(),
         df["Vencimento_real"]
     )
+    
+    # =========================================================
+    # BLOCO DE DIAGNÓSTICO (IMPRIME NO LOG DO STREAMLIT)
+    # =========================================================
+    print("\n" + "="*100)
+    print(f"DIAGNÓSTICO DE TÍTULOS (TIPO: {tipo_padrao}) - ENCONTRADOS: {len(df)}")
+    print("="*100)
+    print(f"{'ID F360':<15} | {'Status F360':<20} | {'Venc. Orig':<10} | {'Liq. F360':<10} | {'Status Calc':<11} | {'Data Painel':<11} | {'Valor'}")
+    print("-" * 100)
+    
+    for _, r in df.iterrows():
+        vid = str(r.get('ParcelaId', ''))[:15]
+        vst = str(r.get('Status_F360', ''))[:20]
+        vvenc = r['Vencimento_real'].strftime('%d/%m/%Y') if pd.notna(r['Vencimento_real']) else '---'
+        vliq = r['Liquidacao_dt'].strftime('%d/%m/%Y') if pd.notna(r['Liquidacao_dt']) else '---'
+        vcalc = str(r.get('Status_Clean', ''))[:11]
+        vuso = r['Vencimento_dt'].strftime('%d/%m/%Y') if pd.notna(r['Vencimento_dt']) else '---'
+        vval = f"R$ {r.get('Valor', 0):,.2f}"
+        print(f"{vid:<15} | {vst:<20} | {vvenc:<10} | {vliq:<10} | {vcalc:<11} | {vuso:<11} | {vval}")
+        
+    print("-" * 100)
+    if ignorados:
+        print(f"⚠️ ATENÇÃO: {len(ignorados)} títulos foram sumariamente excluídos por conterem status 'Cancelado/Baixado'.")
+        print("Alguns excluídos:", ignorados[:15])
+    print("="*100 + "\n")
+    # =========================================================
+
     df = df.dropna(subset=["Vencimento_dt"]).copy()
     df["Dia"] = df["Vencimento_dt"].dt.day
     return df
@@ -321,9 +295,10 @@ _ALIAS = {
     "bruto": ["vbruto", "valorbruto"],
     "liquido": ["vliquido", "valorliquido"],
     "conta": ["conta", "contaliquidacao", "contadeliquidacao"],
-    "liquidacao": ["liquid", "liquidacao", "dataliquidacao"], # Adicionado 'liquid' com ponto
+    "liquidacao": ["liquid", "liquidacao", "dataliquidacao"],
     "id": ["id", "parcelaid", "cartaoid"],
     "modalidade": ["modalidade"],
+    "status": ["status", "statusdaparcela", "situacao"],
 }
 
 def _k(s):
@@ -357,7 +332,7 @@ def _normaliza_cartoes(registros, mapa_cnpj):
             continue
 
         conta_raw = str(_pega(reg, "conta") or "")
-        empresa_raw = _pega(reg, "empresa")  # a API de cartões devolve Empresa.Inscricao
+        empresa_raw = _pega(reg, "empresa")
         empresa_nome = mapa.get(_so_digitos(empresa_raw), "")
         conta_loja = _mapear_conta_para_loja(conta_raw, empresa_nome)
         adq = str(_pega(reg, "adquirente") or "Cartão").strip()
@@ -368,6 +343,9 @@ def _normaliza_cartoes(registros, mapa_cnpj):
         bruto = _num(_pega(reg, "bruto"))
         v_liq = _pega(reg, "liquido")
         liquido = _num(v_liq) if v_liq is not None else bruto
+        
+        status_raw = str(_pega(reg, "status") or "").strip()
+        realizado = "liquidado" in status_raw.lower() or "conciliado" in status_raw.lower()
 
         linhas.append({
             "ParcelaId": str(_pega(reg, "id") or f"CARTAO_{i}"),
@@ -385,7 +363,8 @@ def _normaliza_cartoes(registros, mapa_cnpj):
             "Data_Venda": _data(_pega(reg, "venda")),
             "Vencimento_real": _data(_pega(reg, "vencimento")),
             "Liquidacao_dt": _data(_pega(reg, "liquidacao")),
-        "Status_F360": str(_pega(reg, "status") or "").strip(),
+            "Status_Clean": "REALIZADO" if realizado else "PENDENTE",
+            "Status": "Liquidado" if realizado else "A receber",
         })
 
     df = pd.DataFrame(linhas)
@@ -395,11 +374,8 @@ def _normaliza_cartoes(registros, mapa_cnpj):
     for c in ("Data_Venda", "Vencimento_real", "Liquidacao_dt"):
         df[c] = pd.to_datetime(df[c], errors="coerce")
 
-    df["Status_Clean"] = df["Liquidacao_dt"].notna().map({True: "REALIZADO", False: "PENDENTE"})
-    df["Status"] = df["Status_Clean"].map({"REALIZADO": "Liquidado", "PENDENTE": "A receber"})
-    
-    # A DATA DE CAIXA PRINCIPAL PARA O EXTRATO É A LIQUIDAÇÃO
     df["Vencimento_dt"] = df["Liquidacao_dt"].where(df["Liquidacao_dt"].notna(), df["Vencimento_real"])
+
     df = df.dropna(subset=["Vencimento_dt"]).copy()
     df["Dia"] = df["Vencimento_dt"].dt.day
     return df
@@ -430,14 +406,12 @@ def _listar_cartoes_api(jwt, tipo, ini, fim, tipo_datas, cnpjs):
     return saida
 
 def buscar_cartoes_f360(jwt, d_ini, d_fim, mapa_cnpj, log=None):
-    """Busca cartões expandindo a busca para 30 dias antes (vendas retroativas de agosto que liquidaram em setembro)."""
     log = log if log is not None else []
     cnpjs = [_fmt_cnpj(c) for c in mapa_cnpj]
 
-    # EXPANDIMOS O INÍCIO DA BUSCA DE VENDAS PARA 30 DIAS ANTES DO MÊS ATUAL
     d_ini_expandido = d_ini - timedelta(days=30)
-
     registros, vistos = [], set()
+    
     for td in ("Vencimento", "Liquidação"):
         for ini, fim in _janelas(d_ini_expandido, d_fim):
             rotulo = f"Cartões / {td} {ini:%d/%m/%Y} a {fim:%d/%m/%Y}"
@@ -616,9 +590,6 @@ def buscar_parcelas_f360(jwt, d_ini, d_fim, mapa_cnpj, tipo="Despesa",
                 log.append(f"{rotulo}: ERRO -> {e}")
                 itens = []
             for p in itens:
-                # O ParcelaId é a chave oficial. Se vier ausente, não podemos
-                # usar None como chave, pois isso faria vários títulos virarem
-                # um único registro.
                 parcela_id = p.get("ParcelaId")
                 if parcela_id:
                     chave = ("id", str(parcela_id))
@@ -655,14 +626,9 @@ def buscar_parcelas_f360(jwt, d_ini, d_fim, mapa_cnpj, tipo="Despesa",
 
 
 # ---------------------------------------------------------------------------
-# RELATÓRIO OFICIAL "FLUXO DE CAIXA.XLSX" (tela Fluxo de Caixa do F360)
-# Já vem com saldo inicial, saldo final por dia e a coluna "Orçamentos
-# (entrada)" -- a previsão de receita do plano orçamentário para dias que
-# ainda não têm lançamento real. É a fonte mais confiável: usar os números
-# dela direto garante bater 100% com a tela do F360, sem heurística.
+# RELATÓRIO OFICIAL "FLUXO DE CAIXA.XLSX" E "CONTAS BANCÁRIAS"
 # ---------------------------------------------------------------------------
 def _ler_contas_do_filtro(arquivo):
-    """Lê a aba 'Filtros' para saber quais contas esse export cobre."""
     try:
         df = pd.read_excel(arquivo, sheet_name="Filtros", header=None, dtype=object)
     except Exception:
@@ -673,17 +639,7 @@ def _ler_contas_do_filtro(arquivo):
             return [c.strip() for c in vals[1].split(",") if c.strip()]
     return []
 
-
 def processar_fluxo_de_caixa_oficial(arquivo):
-    """
-    Lê o export 'Fluxo de Caixa.xlsx' (F360 > Fluxo de Caixa > Exportar).
-    Devolve (df_dias, saldo_inicial, contas):
-      df_dias: uma linha por dia com Dia, Mes, Ano, Cartoes, Boleto,
-               Orcamento_Entrada, Outros_Recebimentos, Total_Entradas,
-               Orcamento_Saida, Outros_Pagamentos, Total_Saidas, Saldo.
-      saldo_inicial: valor da linha 'Saldo Inicial' do relatório.
-      contas: lista de contas bancárias que esse export cobre (da aba Filtros).
-    """
     df_raw = pd.read_excel(arquivo, sheet_name="Fluxo de Caixa", header=None, dtype=object)
     cab = _acha_cabecalho(df_raw, ["Data", "Saldo"])
     if cab is None:
@@ -705,12 +661,11 @@ def processar_fluxo_de_caixa_oficial(arquivo):
         "Cartões": "Cartoes", "Boleto": "Boleto",
         "Orçamentos (entrada)": "Orcamento_Entrada",
         "Outros Recebimentos": "Outros_Recebimentos",
-        "Total": "Total_Entradas",  # 1ª ocorrência; a 2ª é tratada abaixo
+        "Total": "Total_Entradas", 
         "Orçamentos (saída)": "Orcamento_Saida",
         "Outros Pagamentos": "Outros_Pagamentos",
         "Saldo": "Saldo",
     }
-    # há duas colunas "Total" (entradas e saídas); renomeia pela posição
     cols_novas, vistos_total = [], 0
     for c in df.columns:
         c_s = str(c).strip()
@@ -733,12 +688,6 @@ def processar_fluxo_de_caixa_oficial(arquivo):
     contas = _ler_contas_do_filtro(arquivo)
     return df.reset_index(drop=True), saldo_inicial, contas
 
-
-# ---------------------------------------------------------------------------
-# CONTAS BANCÁRIAS (API) -- não traz saldo, só cadastro (Id, Nome, Agência...).
-# Serve para pegar o Id real de cada conta, usado no filtro do Extrato
-# Bancário (seção 9 do manual), em vez de casar texto por heurística.
-# ---------------------------------------------------------------------------
 def listar_contas_bancarias(jwt):
     headers = {"Authorization": f"Bearer {jwt}", "Content-Type": "application/json"}
     r = requests.get(f"{BASE}/ContaBancariaPublicAPI/ListarContasBancarias", headers=headers, timeout=30)
@@ -749,12 +698,7 @@ def listar_contas_bancarias(jwt):
         raise RuntimeError(f"F360 retornou erro: {str(corpo)[:300]}")
     return corpo.get("Result") or []
 
-
 def mapear_ids_contas(jwt, nomes_conhecidos=None):
-    """Monta {Id: Nome da conta} a partir do cadastro real, em vez de
-    hardcode. nomes_conhecidos (opcional) é um dict {pedaço do nome: nome
-    padronizado que o app usa}, tipo {'PANTANAL': '17 Pantanal Itaú'}, só
-    para exibir com o mesmo rótulo que o resto do app já usa."""
     contas = listar_contas_bancarias(jwt)
     nomes_conhecidos = nomes_conhecidos or {}
     saida = {}
@@ -765,14 +709,6 @@ def mapear_ids_contas(jwt, nomes_conhecidos=None):
         saida[c.get("Id")] = rotulo
     return saida
 
-
-# ---------------------------------------------------------------------------
-# TABELA DO FLUXO DE CAIXA LIDA DIRETO DA TELA (ler_tabela_fluxo.py)
-# Formato: 2 linhas de cabeçalho, 1 linha "Saldo Inicial (dd/mm/aaaa)",
-# N linhas de dia (10 células: Data, Cartões, Boleto, Orçamento entrada,
-# Outros Recebimentos, Total entrada, Orçamento saída, Outros Pagamentos,
-# Total saída, Saldo) e 1 linha final "Saldo Final".
-# ---------------------------------------------------------------------------
 def processar_tabela_fluxo_dom(caminho_csv):
     import csv as _csv
     with open(caminho_csv, encoding="utf-8-sig") as f:
@@ -795,9 +731,8 @@ def processar_tabela_fluxo_dom(caminho_csv):
             continue
 
         if rotulo in ("Saldo Final",) or not re.match(r"^\d{2}/\d{2}/\d{4}$", rotulo):
-            continue  # pula cabeçalhos e a linha de total
+            continue 
 
-        # linha de dia: Data, Cartões, Boleto, OrcE, OutrosE, TotalE, OrcS, OutrosS, TotalS, Saldo
         vals = (linha + [""] * 10)[:10]
         d, m_, y = vals[0].split("/")
         dias.append({
