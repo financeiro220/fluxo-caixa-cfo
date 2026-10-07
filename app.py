@@ -297,12 +297,6 @@ def _preparar_titulos_detalhe(df, status=None):
 
     d = d[colunas].copy()
 
-    # O F360 pode trazer colunas com nomes que acabam ficando repetidos
-    # depois dos renames (por exemplo, Status + Status_Clean). O
-    # st.dataframe/pyarrow não aceita DataFrames com nomes duplicados.
-    # Primeiro eliminamos duplicidades literais mantendo a primeira coluna.
-    d = d.loc[:, ~d.columns.duplicated(keep="first")].copy()
-
     if "Vencimento_dt" in d.columns:
         d["Vencimento"] = pd.to_datetime(
             d["Vencimento_dt"], errors="coerce"
@@ -324,24 +318,6 @@ def _preparar_titulos_detalhe(df, status=None):
         "Status_Clean": "Status",
     }
     d = d.rename(columns=rename)
-
-    # Depois do rename pode surgir uma nova duplicidade, por exemplo se
-    # o F360 já possuir uma coluna chamada "Status". Resolve novamente.
-    d = d.loc[:, ~d.columns.duplicated(keep="first")].copy()
-
-    # Segurança adicional: nomes únicos para qualquer combinação de
-    # colunas inesperada que venha da API.
-    nomes = []
-    contagem = {}
-    for nome in d.columns:
-        nome = str(nome)
-        if nome not in contagem:
-            contagem[nome] = 0
-            nomes.append(nome)
-        else:
-            contagem[nome] += 1
-            nomes.append(f"{nome}_{contagem[nome]}")
-    d.columns = nomes
 
     return d
 
