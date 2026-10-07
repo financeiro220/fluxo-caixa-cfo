@@ -169,21 +169,52 @@ def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
 
         tit = p.get("DadosDoTitulo") or {}
         fornecedor = (tit.get("ClienteFornecedor") or {}).get("Nome", "") or ""
-        # O F360 pode devolver uma data em "Liquidacao" também para parcelas
-        # agendadas. Portanto, a simples existência da data NÃO significa que
-        # o título já foi pago. O status do F360 é a fonte principal.
-        status_explicitamente_realizado = (
-            "liquidado" in s_low
-            or "conciliado" in s_low
-        )
-        status_agendado = "agendado" in s_low
-        realizado = (
-            status_explicitamente_realizado
-            if status.strip()
-            else pd.notna(p.get("Liquidacao"))
-        )
-        if status_agendado:
+        # O F360 possui status distintos para ABERTO, AGENDADO e LIQUIDADO.
+        # A existência de uma data em "Liquidacao" NÃO significa, sozinha,
+        # que o dinheiro já saiu do caixa: títulos agendados podem trazer uma
+        # data futura nesse campo.
+        #
+        # Para o CFO, a regra é:
+        #   - ABERTO/AGENDADO/PENDENTE -> PENDENTE
+        #   - LIQUIDADO/CONCILIADO -> REALIZADO
+        #   - liquidação futura -> nunca pode ser REALIZADO hoje
+        #
+        # A API oficial lista "Agendado" separadamente de "Liquidado".
+        status_txt = " ".join(status.strip().lower().split())
+        status_sem_pont = re.sub(r"[^a-z0-9 ]", "", status_txt)
+        status_pendente = any(k in status_sem_pont for k in (
+            "agendado",
+            "aberto",
+            "pendente",
+            "aprovado",
+            "renegociado",
+            "naovinculado",
+        ))
+        status_realizado = any(k in status_sem_pont for k in (
+            "liquidado",
+            "conciliado",
+        ))
+
+        liquidacao_dt_raw = _data(p.get("Liquidacao"))
+        hoje = pd.Timestamp.today().normalize()
+
+        if status_pendente:
             realizado = False
+        elif status_realizado:
+            # Proteção contra a inconsistência observada no F360: se a data
+            # informada para liquidação ainda está no futuro, não tratamos como
+            # dinheiro já realizado.
+            realizado = bool(
+                pd.notna(liquidacao_dt_raw)
+                and liquidacao_dt_raw.normalize() <= hoje
+            )
+        else:
+            # Só usamos a data como fallback quando o F360 não informou status.
+            realizado = bool(
+                not status.strip()
+                and pd.notna(liquidacao_dt_raw)
+                and liquidacao_dt_raw.normalize() <= hoje
+            )
         bruto = float(p.get("ValorBruto") or 0)
         conta_raw = str(p.get("Conta") or "")
         cnpj = _so_digitos((tit.get("Empresa") or {}).get("Inscricao"))
@@ -233,10 +264,17 @@ def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
     df["Vencimento_real"] = pd.to_datetime(df["Vencimento_real"], errors="coerce")
     df["Liquidacao_dt"] = pd.to_datetime(df["Liquidacao_dt"], errors="coerce")
 
-    df["Vencimento_dt"] = df["Liquidacao_dt"].where(
-        df["Liquidacao_dt"].notna(),
-        df["Vencimento_real"],
+    # DATA USADA PELO FILTRO DO PAINEL:
+    # - realizado: data efetiva de liquidação;
+    # - pendente/agendado: data de vencimento.
+    # Isso evita que títulos vencidos em 01-08/10, mas agendados para 09/10,
+    # desapareçam dos dias 01-08 e sejam todos empurrados para 09/10.
+    df["Vencimento_dt"] = df["Vencimento_real"]
+    mask_realizado = (
+        (df["Status_Clean"] == "REALIZADO")
+        & df["Liquidacao_dt"].notna()
     )
+    df.loc[mask_realizado, "Vencimento_dt"] = df.loc[mask_realizado, "Liquidacao_dt"]
     df = df.dropna(subset=["Vencimento_dt"]).copy()
     df["Dia"] = df["Vencimento_dt"].dt.day
     return df
