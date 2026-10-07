@@ -1,6 +1,6 @@
 """
 f360_api.py - Integração com a API pública do F360.
-Inclui alertas de erro visíveis no Streamlit para evitar falhas silenciosas.
+Inclui leitura exata do Rateio (sem distorção de descontos negativos).
 """
 import json
 import re
@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 import requests
-import streamlit as st  # Adicionado para mostrar os erros na tela
+import streamlit as st  
 
 BASE = "https://financas.f360.com.br"
 JANELA_DIAS = 30
@@ -140,7 +140,6 @@ def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
         status = str(p.get("Status", ""))
         s_low = status.lower()
         
-        # FIX: Removido o 'baixad', pois o F360 pode usar 'Baixado' para títulos liquidados.
         if p.get("Cancelada") or "cancelad" in s_low:
             continue
 
@@ -176,7 +175,6 @@ def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
         else:
             realizado = bool(not status.strip() and pd.notna(liquidacao_dt_raw) and liquidacao_dt_raw.normalize() <= hoje)
             
-        bruto = float(p.get("ValorBruto") or 0)
         conta_raw = str(p.get("Conta") or "")
         cnpj = _so_digitos((tit.get("Empresa") or {}).get("Inscricao"))
         empresa_nome = mapa.get(cnpj, "")
@@ -187,11 +185,31 @@ def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
         elif "despesa" in tipo_item or "pagar" in tipo_item: tipo_mov = "DESPESA"
         else: tipo_mov = tipo_padrao
 
-        rateio = p.get("Rateio") or [{}]
-        soma = sum(abs(float(r.get("Valor") or 0)) for r in rateio)
-
-        for r in rateio:
-            peso = abs(float(r.get("Valor") or 0)) / soma if soma else 1 / len(rateio)
+        # FIX: Leitura exata do Rateio para não distorcer descontos
+        rateio = p.get("Rateio")
+        if rateio and isinstance(rateio, list) and len(rateio) > 0:
+            for r in rateio:
+                valor_linha = float(r.get("Valor") or 0)
+                linhas.append({
+                    "ParcelaId": p.get("ParcelaId"),
+                    "Número": p.get("Numero") or tit.get("NumeroDoTitulo", ""),
+                    "Tipo_Movimento": tipo_mov,
+                    "Origem": "Título",
+                    "Detalhe": p.get("MeioDePagamento") or "Não informado",
+                    "Empresa": conta_loja,
+                    "Empresa_Loja": empresa_nome,
+                    "Conta": conta_raw,
+                    "Cliente / Fornecedor": fornecedor,
+                    "Plano de Contas": r.get("PlanoDeContas") or "Outros",
+                    "Valor": valor_linha,
+                    "Valor_Bruto": valor_linha,
+                    "Status_F360": status,
+                    "Status_Clean": "REALIZADO" if realizado else "PENDENTE",
+                    "Vencimento_real": p.get("Vencimento"),
+                    "Liquidacao_raw": p.get("Liquidacao"),
+                })
+        else:
+            bruto = float(p.get("ValorBruto") or 0)
             linhas.append({
                 "ParcelaId": p.get("ParcelaId"),
                 "Número": p.get("Numero") or tit.get("NumeroDoTitulo", ""),
@@ -202,9 +220,9 @@ def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
                 "Empresa_Loja": empresa_nome,
                 "Conta": conta_raw,
                 "Cliente / Fornecedor": fornecedor,
-                "Plano de Contas": r.get("PlanoDeContas") or "Outros",
-                "Valor": bruto * peso,
-                "Valor_Bruto": bruto * peso,
+                "Plano de Contas": "Outros",
+                "Valor": bruto,
+                "Valor_Bruto": bruto,
                 "Status_F360": status,
                 "Status_Clean": "REALIZADO" if realizado else "PENDENTE",
                 "Vencimento_real": p.get("Vencimento"),
@@ -470,7 +488,6 @@ def buscar_parcelas_f360(jwt, d_ini, d_fim, mapa_cnpj, tipo="Despesa", incluir_l
 
     unicas, passo, total = {}, 0, len(janelas) * len(tipos_data)
     
-    # Barreiras para capturar exatamente onde a API falha
     for td in tipos_data:
         for ini, fim in janelas:
             try:
