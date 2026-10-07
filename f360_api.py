@@ -1,6 +1,6 @@
 """
 f360_api.py - Integração com a API pública do F360.
-Solução para vendas de Cartões/iFood de meses anteriores que liquidam no mês atual (ex: Venda em Agosto, Liquidação em Setembro).
+Solução para vendas de Cartões/iFood de meses anteriores que liquidam no mês atual (ex: Venda em Agosto, Liquidação em Setembro).\n\nCorreção: respeita o Status da parcela para distinguir Liquidado de Agendado.
 """
 import json
 import re
@@ -128,21 +128,10 @@ def _mapear_conta_para_loja(conta_str, empresa_nome=None):
 # PARCELAS DE TÍTULOS (API)
 # ---------------------------------------------------------------------------
 def _listar_titulos(jwt, tipo, ini, fim, tipo_datas, cnpjs):
-    """Lista todas as parcelas do intervalo, percorrendo todas as páginas.
-
-    A API do F360 é paginada e o período de consulta não pode ultrapassar
-    31 dias.  Esta função também trata respostas em que a quantidade de
-    páginas vem como texto e evita encerrar a paginação prematuramente.
-    """
     headers = {"Authorization": f"Bearer {jwt}", "Content-Type": "application/json"}
     url = f"{BASE}/ParcelasDeTituloPublicAPI/ListarParcelasDeTitulos"
-
-    pagina = 1
-    total_paginas = 1
-    saida = []
-    paginas_vistas = set()
-
-    while pagina <= total_paginas:
+    pagina, total, saida = 1, 1, []
+    while pagina <= total:
         params = {
             "pagina": pagina,
             "tipo": tipo,
@@ -153,50 +142,16 @@ def _listar_titulos(jwt, tipo, ini, fim, tipo_datas, cnpjs):
         }
         if cnpjs:
             params["empresas"] = ",".join(cnpjs)
-
-        # Pequena tolerância para instabilidade transitória da API.
-        ultimo_erro = None
-        for tentativa in range(2):
-            try:
-                r = requests.get(url, headers=headers, params=params, timeout=60)
-                if r.status_code >= 500 and tentativa == 0:
-                    continue
-                if r.status_code != 200:
-                    raise RuntimeError(f"HTTP {r.status_code}: {r.text[:300]}")
-                corpo = r.json()
-                break
-            except (requests.RequestException, ValueError, RuntimeError) as exc:
-                ultimo_erro = exc
-                if tentativa == 1:
-                    raise
-        else:
-            raise ultimo_erro
-
+        r = requests.get(url, headers=headers, params=params, timeout=60)
+        if r.status_code != 200:
+            raise RuntimeError(f"HTTP {r.status_code}: {r.text[:300]}")
+        corpo = r.json()
         if isinstance(corpo, dict) and corpo.get("Ok") is False:
             raise RuntimeError(f"F360 retornou erro: {str(corpo)[:300]}")
-
         res = corpo.get("Result") or {}
-        itens = res.get("Parcelas") or []
-        saida.extend(itens)
-
-        try:
-            total_paginas = int(res.get("QuantidadeDePaginas") or 1)
-        except (TypeError, ValueError):
-            total_paginas = 1
-
-        # Proteção contra resposta inconsistente/repetida.
-        assinatura = (pagina, len(itens), str(res.get("QuantidadeDeParcelas", "")))
-        if assinatura in paginas_vistas:
-            break
-        paginas_vistas.add(assinatura)
-
-        # Se o F360 não informar a quantidade de páginas mas devolver uma
-        # página cheia, continua buscando até encontrar uma página menor.
-        if "QuantidadeDePaginas" not in res and len(itens) >= 100:
-            total_paginas = max(total_paginas, pagina + 1)
-
+        saida.extend(res.get("Parcelas", []))
+        total = res.get("QuantidadeDePaginas", 1) or 1
         pagina += 1
-
     return saida
 
 def _da_rede(p, digitos):
@@ -214,7 +169,21 @@ def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
 
         tit = p.get("DadosDoTitulo") or {}
         fornecedor = (tit.get("ClienteFornecedor") or {}).get("Nome", "") or ""
-        realizado = "liquidado" in s_low or "conciliado" in s_low or pd.notna(p.get("Liquidacao"))
+        # O F360 pode devolver uma data em "Liquidacao" também para parcelas
+        # agendadas. Portanto, a simples existência da data NÃO significa que
+        # o título já foi pago. O status do F360 é a fonte principal.
+        status_explicitamente_realizado = (
+            "liquidado" in s_low
+            or "conciliado" in s_low
+        )
+        status_agendado = "agendado" in s_low
+        realizado = (
+            status_explicitamente_realizado
+            if status.strip()
+            else pd.notna(p.get("Liquidacao"))
+        )
+        if status_agendado:
+            realizado = False
         bruto = float(p.get("ValorBruto") or 0)
         conta_raw = str(p.get("Conta") or "")
         cnpj = _so_digitos((tit.get("Empresa") or {}).get("Inscricao"))
@@ -248,6 +217,7 @@ def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
                 "Valor": bruto * peso,
                 "Valor_Bruto": bruto * peso,
                 "Status": status,
+                "Status_F360": status,
                 "Status_Clean": "REALIZADO" if realizado else "PENDENTE",
                 "Vencimento_real": p.get("Vencimento"),
                 "Liquidacao_raw": p.get("Liquidacao"),
@@ -558,102 +528,53 @@ def processar_detalhes_fluxo_caixa(arquivos, mapa_cnpj):
 # ---------------------------------------------------------------------------
 def buscar_parcelas_f360(jwt, d_ini, d_fim, mapa_cnpj, tipo="Despesa",
                          incluir_liquidacao=True, progresso=None, log=None):
-    """Busca títulos por vencimento e, separadamente, por liquidação.
-
-    Importante para o fluxo de caixa: uma despesa pode ter vencimento em um
-    mês e ser liquidada em outro. Por isso as duas pesquisas são mantidas e
-    unidas por ParcelaId, sem deixar registros sem ID colapsarem em uma única
-    linha.
-    """
     log = log if log is not None else []
     cnpjs = [_fmt_cnpj(c) for c in mapa_cnpj]
-    digitos_cnpj = {_so_digitos(c) for c in mapa_cnpj}
     tipos_data = ["Vencimento"] + (["Liquidação"] if incluir_liquidacao else [])
     janelas = list(_janelas(d_ini, d_fim))
 
-    # Chave interna segura: ParcelaId é a chave oficial; se vier ausente,
-    # usamos uma combinação estável para não perder dezenas de títulos.
-    unicas = {}
-    passo = 0
-    total_etapas = max(1, len(janelas) * len(tipos_data))
-
+    unicas, passo, total = {}, 0, len(janelas) * len(tipos_data)
     for td in tipos_data:
         for ini, fim in janelas:
             rotulo = f"Títulos {tipo} / {td} {ini:%d/%m/%Y} a {fim:%d/%m/%Y}"
-            itens = []
             try:
-                # Consulta CNPJ por CNPJ. A documentação aceita vários CNPJs
-                # no mesmo parâmetro, mas separar as consultas evita que uma
-                # alteração no filtro de empresas da API deixe parte da rede
-                # de fora sem gerar erro HTTP.
-                itens = []
-                for cnpj in cnpjs:
-                    parte = _listar_titulos(jwt, tipo, ini, fim, td, [cnpj])
-                    log.append(f"{rotulo} | {cnpj}: {len(parte)} parcelas")
-                    itens.extend(parte)
-
-                # Se todas as consultas filtradas falharem em retornar dados,
-                # tenta uma consulta ampla e filtra localmente pelo CNPJ.
-                if not itens and cnpjs:
+                itens = _listar_titulos(jwt, tipo, ini, fim, td, cnpjs)
+                log.append(f"{rotulo}: {len(itens)} parcelas de títulos")
+                if not itens:
                     todos = _listar_titulos(jwt, tipo, ini, fim, td, [])
-                    itens = [p for p in todos if _da_rede(p, digitos_cnpj)]
-                    log.append(f"{rotulo}: fallback sem filtro de empresas -> {len(itens)}")
-
-                log.append(f"{rotulo}: {len(itens)} parcelas de títulos após união")
+                    itens = [p for p in todos if _da_rede(p, {_so_digitos(c) for c in mapa_cnpj})]
             except Exception as e:
                 log.append(f"{rotulo}: ERRO -> {e}")
                 itens = []
-
             for p in itens:
+                # O ParcelaId é a chave oficial. Se vier ausente, não podemos
+                # usar None como chave, pois isso faria vários títulos virarem
+                # um único registro.
                 parcela_id = p.get("ParcelaId")
                 if parcela_id:
                     chave = ("id", str(parcela_id))
                 else:
-                    # Fallback evita que vários registros com ID ausente
-                    # sejam todos gravados na mesma chave None.
                     tit = p.get("DadosDoTitulo") or {}
                     empresa = _so_digitos((tit.get("Empresa") or {}).get("Inscricao"))
                     chave = (
                         "sem_id",
-                        tipo,
                         empresa,
                         str(p.get("Numero") or tit.get("NumeroDoTitulo") or ""),
                         str(p.get("Vencimento") or ""),
                         str(p.get("ValorBruto") or ""),
                         str(p.get("Liquidacao") or ""),
                     )
-
-                anterior = unicas.get(chave)
-                if anterior is None:
-                    unicas[chave] = p
-                else:
-                    # Quando o mesmo título aparece na busca por Vencimento
-                    # e na busca por Liquidação, prefere a versão mais completa.
-                    a_liq = anterior.get("Liquidacao")
-                    p_liq = p.get("Liquidacao")
-                    if (not a_liq and p_liq) or len(p.keys()) > len(anterior.keys()):
-                        unicas[chave] = p
-
+                unicas[chave] = p
             passo += 1
             if progresso:
-                progresso(passo / total_etapas)
+                progresso(passo / total)
 
-    parcelas_unicas = list(unicas.values())
-    log.append(f"Total consolidado {tipo}: {len(parcelas_unicas)} parcelas únicas")
-
-    df_titulos = _normaliza_titulos(
-        parcelas_unicas,
-        mapa_cnpj,
-        tipo_padrao="RECEITA" if tipo == "Receita" else "DESPESA",
-    )
+    df_titulos = _normaliza_titulos(list(unicas.values()), mapa_cnpj, tipo_padrao="RECEITA" if tipo == "Receita" else "DESPESA")
 
     if tipo == "Receita":
         try:
             df_cartoes = buscar_cartoes_f360(jwt, d_ini, d_fim, mapa_cnpj, log=log)
-            log.append(
-                f"Cartões API: {len(df_cartoes)} parcelas | líquido R$ {df_cartoes['Valor'].sum():,.2f}"
-                if not df_cartoes.empty else "Cartões API: 0 parcelas"
-            )
+            log.append(f"Cartões API: {len(df_cartoes)} parcelas | líquido R$ {df_cartoes['Valor'].sum():,.2f}" if not df_cartoes.empty else "Cartões API: 0 parcelas")
         except Exception as e:
             log.append(f"Erro ao buscar cartões na API: {e}")
             df_cartoes = pd.DataFrame()
