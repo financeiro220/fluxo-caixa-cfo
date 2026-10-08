@@ -1,6 +1,6 @@
 """
 f360_api.py - Integração com a API pública do F360.
-Inclui leitura exata do Rateio, proteção em cartões e alinhamento de Agendamentos.
+Inclui leitura exata do Rateio, proteção em cartões e alinhamento inteligente de Vencidos.
 """
 import json
 import re
@@ -131,6 +131,8 @@ def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
     mapa = {_so_digitos(k): v for k, v in mapa_cnpj.items()}
     linhas = []
     
+    hoje = pd.Timestamp.today().normalize()
+    
     for p in parcelas:
         status = str(p.get("Status", ""))
         s_low = status.lower()
@@ -149,9 +151,7 @@ def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
         status_realizado = status_compacto in {"liquidado", "liquidadoall", "liquidadoconciliado", "conciliado", "baixado"}
 
         liquidacao_dt_raw = _data(p.get("Liquidacao"))
-        hoje = pd.Timestamp.today().normalize()
 
-        # FIX: Confia no status "Liquidado" do F360, mantendo a integridade do sistema nativo
         if status_pendente: realizado = False
         elif status_realizado: realizado = True
         else: realizado = bool(not status.strip() and pd.notna(liquidacao_dt_raw) and liquidacao_dt_raw.normalize() <= hoje)
@@ -198,8 +198,16 @@ def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
     df["Vencimento_real"] = pd.to_datetime(df["Vencimento_real"], errors="coerce")
     df["Liquidacao_dt"] = pd.to_datetime(df["Liquidacao_dt"], errors="coerce")
 
-    # FIX: Restaura a data de Liquidação/Agendamento como sendo a data definitiva do fluxo de caixa
-    df["Vencimento_dt"] = df["Liquidacao_dt"].where(df["Liquidacao_dt"].notna(), df["Vencimento_real"])
+    # REGRA INTELIGENTE PARA VENCIDOS
+    # Se está PENDENTE e o vencimento já passou, movemos para a data de HOJE 
+    # (para que as contas atrasadas sejam cobradas no saldo atual e não fiquem perdidas no passado)
+    df["Vencimento_dt"] = df["Vencimento_real"]
+    mascara_pendente_atrasado = df["Status_Clean"].eq("PENDENTE") & (df["Vencimento_real"] < hoje)
+    df.loc[mascara_pendente_atrasado, "Vencimento_dt"] = hoje
+    
+    mascara_realizado = df["Status_Clean"].eq("REALIZADO") & df["Liquidacao_dt"].notna()
+    df.loc[mascara_realizado, "Vencimento_dt"] = df.loc[mascara_realizado, "Liquidacao_dt"]
+
     df = df.dropna(subset=["Vencimento_dt"]).copy()
     df["Dia"] = df["Vencimento_dt"].dt.day
     return df
@@ -242,6 +250,9 @@ def _achata(reg, saida=None):
 def _normaliza_cartoes(registros, mapa_cnpj):
     mapa = {_so_digitos(k): v for k, v in mapa_cnpj.items()}
     linhas = []
+    
+    hoje = pd.Timestamp.today().normalize()
+    
     for i, reg in enumerate(registros):
         reg = _achata(reg)
         if str(reg.get("Cancelada")).lower() == "true" or str(reg.get("Cancelado")).lower() == "true": continue
@@ -275,7 +286,15 @@ def _normaliza_cartoes(registros, mapa_cnpj):
     df = pd.DataFrame(linhas)
     if df.empty: return df
     for c in ("Data_Venda", "Vencimento_real", "Liquidacao_dt"): df[c] = pd.to_datetime(df[c], errors="coerce")
-    df["Vencimento_dt"] = df["Liquidacao_dt"].where(df["Liquidacao_dt"].notna(), df["Vencimento_real"])
+    
+    # Aplica a mesma regra de trazer os atrasados para hoje nos cartões
+    df["Vencimento_dt"] = df["Vencimento_real"]
+    mascara_pendente_atrasado = df["Status_Clean"].eq("PENDENTE") & (df["Vencimento_real"] < hoje)
+    df.loc[mascara_pendente_atrasado, "Vencimento_dt"] = hoje
+    
+    mascara_realizado = df["Status_Clean"].eq("REALIZADO") & df["Liquidacao_dt"].notna()
+    df.loc[mascara_realizado, "Vencimento_dt"] = df.loc[mascara_realizado, "Liquidacao_dt"]
+    
     df = df.dropna(subset=["Vencimento_dt"]).copy()
     df["Dia"] = df["Vencimento_dt"].dt.day
     return df
@@ -344,9 +363,6 @@ def processar_parcelas_cartoes_arquivo(arquivo, mapa_cnpj):
     df = df[df.apply(lambda r: _pega(r.to_dict(), "adquirente") is not None, axis=1)]
     return _normaliza_cartoes(df.to_dict("records"), mapa_cnpj)
 
-# ---------------------------------------------------------------------------
-# RELATÓRIO OFICIAL "DETALHES FLUXO DE CAIXA.XLSX" E "FLUXO DE CAIXA.XLSX"
-# ---------------------------------------------------------------------------
 def _acha_cabecalho(df_raw, tokens):
     for idx, row in df_raw.iterrows():
         vals = [str(v) for v in row.dropna()]
@@ -362,12 +378,6 @@ def _ler_aba(caminho_ou_buffer, aba, tokens_cabecalho):
     df.columns = [str(c).strip() for c in df_raw.iloc[cab].values]
     df = df.dropna(how="all")
     return df.reset_index(drop=True)
-
-def processar_detalhes_fluxo_caixa(arquivos, mapa_cnpj):
-    if not isinstance(arquivos, (list, tuple)): arquivos = [arquivos]
-    linhas, brutos = [], {"titulos": [], "cartoes": [], "transferencias": [], "ajustes": []}
-    # Funcionalidade extraída para manter foco - a base é processar_fluxo_de_caixa_oficial
-    return pd.DataFrame(), brutos
 
 def buscar_parcelas_f360(jwt, d_ini, d_fim, mapa_cnpj, tipo="Despesa", incluir_liquidacao=True, progresso=None, log=None):
     if not jwt:

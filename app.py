@@ -367,7 +367,6 @@ with tabs[0]:
             st.bar_chart(comp, height=280)
         else: st.info("Sincronize a API para visualizar a composição das despesas.")
 
-    # FIX: Tabela com try/except para evitar falhas silenciosas de formatação
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown('<div class="section-title">🏪 Resultado por Loja</div>', unsafe_allow_html=True)
     if not df_api.empty:
@@ -427,7 +426,10 @@ with tabs[1]:
             {"Linha de Extrato": "6. 🏦 SALDO FINAL BANCÁRIO", **dict(zip(df_cards["Dia"], df_cards.get("Saldo", 0)))},
         ]
         df_display = pd.DataFrame(linhas_of)[["Linha de Extrato"] + dias_of]
-        st.dataframe(df_display.style.apply(highlight_saldo, axis=1).format({d: "R$ {:,.2f}" for d in dias_of}), use_container_width=True, hide_index=True)
+        try:
+            st.dataframe(df_display.style.apply(highlight_saldo, axis=1).format({d: "R$ {:,.2f}" for d in dias_of}), use_container_width=True, hide_index=True)
+        except Exception:
+            st.dataframe(df_display, use_container_width=True, hide_index=True)
 
 with tabs[2]:
     st.subheader("DRE de Caixa — Visão Gerencial por Plano de Contas")
