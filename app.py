@@ -87,28 +87,19 @@ MAPA_CNPJ_LOJA = {
     "36240923000320": "8 - GOIABEIRAS"
 }
 
-def categorizar_plano_contas(plano):
-    p = str(plano).upper().strip()
-    if any(k in p for k in ['MÚTUO', 'MUTUO', 'INTERCOMPANY']): return "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"
-    if any(k in p for k in ['SÓCIO', 'SOCIO', 'LUCRO', 'DISTRIBUIÇÃO', 'DIVIDENDO', 'PRÓ-LABORE', 'PRO-LABORE']): return "7. DESPESAS DE SÓCIOS"
-    if any(k in p for k in ['CMV', 'DESCARTÁVEIS', 'LEITE', 'INSUMOS', 'BOBINAS', 'FRUTAS']): return "1. FORNECEDORES / MERCADORIAS (CMV)"
-    if any(k in p for k in ['ICMS', 'IMPOSTO', 'FISCAL', 'DAS', 'TAXAS MUNICIPAIS', 'PIS', 'COFINS']): return "2. IMPOSTOS SOBRE VENDAS"
-    if any(k in p for k in ['ALUGUEL', 'CONDOMÍNIO', 'ENERGIA', 'ÁGUA', 'IPTU', 'LIMPEZA']): return "3. DESPESAS DE OCUPAÇÃO"
-    if any(k in p for k in ['SALÁRIO', 'VALE', 'FOLHA', 'FGTS', 'FÉRIAS', 'RESCISÃO', 'FUNCIONÁRIOS']): return "4. FOLHA DE PAGAMENTO & ENCARGOS"
-    if any(k in p for k in ['EMPRÉSTIMO', 'CAPITAL DE GIRO', 'JUROS', 'MULTA', 'TARIFAS']): return "6. AMORTIZAÇÃO DE DÍVIDAS & CAPITAL"
-    return "5. DESPESAS OPERACIONAIS & VENDAS"
-
-def categorizar_receita(row):
-    p = str(row.get("Plano de Contas") or "").upper().strip()
-    if any(k in p for k in ['MÚTUO', 'MUTUO', 'INTERCOMPANY']): return "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"
-    return "0. RECEITAS DE VENDAS"
-
 @st.cache_data(ttl=3600)
 def carregar_fluxo_oficial(_arquivos):
     resultado = {}
     for arq in _arquivos:
         df_dias, saldo_ini, contas = processar_fluxo_de_caixa_oficial(arq)
+        
+        # Proteção contra múltiplos ficheiros sobrescrevendo a visão global
+        nome = getattr(arq, "name", "Arquivo")
         chave = contas[0] if len(contas) == 1 else "Ver Todas as Contas"
+        
+        if chave in resultado and chave == "Ver Todas as Contas":
+            st.toast(f"⚠️ Aviso: O ficheiro '{nome}' substituiu a tabela do ficheiro anterior porque partilham o mesmo nível de visualização.")
+            
         resultado[chave] = {"df": df_dias, "saldo_inicial": saldo_ini, "contas": contas}
     return resultado
 
@@ -139,6 +130,7 @@ def _preparar_titulos_detalhe(df, status=None):
     if status == "REALIZADO": d = d[d["Status_Clean"].astype(str).str.upper() == "REALIZADO"]
     elif status == "PENDENTE": d = d[d["Status_Clean"].astype(str).str.upper() == "PENDENTE"]
 
+    # INCLUI COLUNA DO CLIENTE/FORNECEDOR
     colunas_preferidas = ["Vencimento_dt", "Empresa", "Empresa_Loja", "Cliente / Fornecedor", "Plano de Contas", "Categoria_CFO", "Valor", "Status_Clean", "Status", "Data_Liquidacao"]
     colunas = [c for c in colunas_preferidas if c in d.columns]
     for c in d.columns:
@@ -173,7 +165,7 @@ def _preparar_titulos_detalhe(df, status=None):
             nomes.append(f"{nome}_{contagem[nome]}")
     d.columns = nomes
     
-    # Reordenar as colunas para o Fornecedor ficar num sítio lógico (depois da Loja)
+    # ORDENA AS COLUNAS
     cols = d.columns.tolist()
     if "Vencimento" in cols: cols.insert(0, cols.pop(cols.index("Vencimento")))
     if "Empresa" in cols: cols.insert(1, cols.pop(cols.index("Empresa")))
@@ -250,7 +242,19 @@ with st.sidebar:
 
             log_desp, log_rec = [], []
             df_desp = buscar_parcelas_f360(st.session_state.jwt, d_ini, d_fim, MAPA_CNPJ_LOJA, "Despesa", log=log_desp)
-            if not df_desp.empty: df_desp["Categoria_CFO"] = df_desp["Plano de Contas"].apply(categorizar_plano_contas)
+            if not df_desp.empty:
+                # Função isolada para categorizar
+                def cat_desp(p):
+                    p = str(p).upper().strip()
+                    if any(k in p for k in ['MÚTUO', 'MUTUO', 'INTERCOMPANY']): return "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"
+                    if any(k in p for k in ['SÓCIO', 'SOCIO', 'LUCRO', 'DISTRIBUIÇÃO', 'DIVIDENDO', 'PRÓ-LABORE']): return "7. DESPESAS DE SÓCIOS"
+                    if any(k in p for k in ['CMV', 'DESCARTÁVEIS', 'LEITE', 'INSUMOS', 'BOBINAS', 'FRUTAS']): return "1. FORNECEDORES / MERCADORIAS (CMV)"
+                    if any(k in p for k in ['ICMS', 'IMPOSTO', 'FISCAL', 'DAS', 'TAXAS MUNICIPAIS', 'PIS', 'COFINS']): return "2. IMPOSTOS SOBRE VENDAS"
+                    if any(k in p for k in ['ALUGUEL', 'CONDOMÍNIO', 'ENERGIA', 'ÁGUA', 'IPTU', 'LIMPEZA']): return "3. DESPESAS DE OCUPAÇÃO"
+                    if any(k in p for k in ['SALÁRIO', 'VALE', 'FOLHA', 'FGTS', 'FÉRIAS', 'RESCISÃO', 'FUNCIONÁRIOS']): return "4. FOLHA DE PAGAMENTO & ENCARGOS"
+                    if any(k in p for k in ['EMPRÉSTIMO', 'CAPITAL DE GIRO', 'JUROS', 'MULTA', 'TARIFAS']): return "6. AMORTIZAÇÃO DE DÍVIDAS & CAPITAL"
+                    return "5. DESPESAS OPERACIONAIS & VENDAS"
+                df_desp["Categoria_CFO"] = df_desp["Plano de Contas"].apply(cat_desp)
             st.session_state.df_api_desp, st.session_state.log_api_desp = df_desp, log_desp
 
             df_rec = buscar_parcelas_f360(st.session_state.jwt, d_ini, d_fim, MAPA_CNPJ_LOJA, "Receita", log=log_rec)
