@@ -202,8 +202,10 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# FIX: Forçando o uso da chave garantida!
-F360_TOKEN = "11001cbb-792d-45e5-b2f9-03ffc46fe7ed"
+try:
+    F360_TOKEN = st.secrets["F360_TOKEN"]
+except:
+    F360_TOKEN = "11001cbb-792d-45e5-b2f9-03ffc46fe7ed"
 
 MAPA_CNPJ_LOJA = {
     "36240923000168": "4- PANTANAL",
@@ -262,195 +264,37 @@ def highlight_saldo(row):
 def brl(v):
     return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-def _preparar_titulos_detalhe(df, status=None):
-    """Prepara os títulos que serão exibidos no painel de detalhes."""
-    if df is None or df.empty:
-        return pd.DataFrame()
-
-    d = df.copy()
-
-    if status == "REALIZADO":
-        d = d[d["Status_Clean"].astype(str).str.upper() == "REALIZADO"]
-    elif status == "PENDENTE":
-        d = d[d["Status_Clean"].astype(str).str.upper() == "PENDENTE"]
-
-    colunas_preferidas = [
-        "Vencimento_dt", "Empresa", "Empresa_Loja",
-        "Cliente/Fornecedor", "Cliente", "Fornecedor",
-        "Plano de Contas", "Categoria_CFO", "Valor",
-        "Status_Clean", "Status", "Data_Liquidacao"
-    ]
-
-    colunas = [c for c in colunas_preferidas if c in d.columns]
-
-    # Mantém também eventuais identificadores úteis do lançamento.
-    for c in d.columns:
-        if c not in colunas and any(k in str(c).lower() for k in [
-            "titulo", "documento", "parcela", "id", "descrição", "descricao"
-        ]):
-            colunas.append(c)
-
-    if not colunas:
-        return d
-
-    d = d[colunas].copy()
-
-    # O F360 pode trazer colunas com nomes que acabam ficando repetidos
-    # depois dos renames (por exemplo, Status + Status_Clean). O
-    # st.dataframe/pyarrow não aceita DataFrames com nomes duplicados.
-    # Primeiro eliminamos duplicidades literais mantendo a primeira coluna.
-    d = d.loc[:, ~d.columns.duplicated(keep="first")].copy()
-
-    if "Vencimento_dt" in d.columns:
-        d["Vencimento"] = pd.to_datetime(
-            d["Vencimento_dt"], errors="coerce"
-        ).dt.strftime("%d/%m/%Y")
-        d = d.drop(columns=["Vencimento_dt"])
-
-    if "Data_Liquidacao" in d.columns:
-        d["Liquidação"] = pd.to_datetime(
-            d["Data_Liquidacao"], errors="coerce"
-        ).dt.strftime("%d/%m/%Y")
-
-    if "Valor" in d.columns:
-        d["Valor"] = pd.to_numeric(d["Valor"], errors="coerce").fillna(0)
-
-    rename = {
-        "Empresa_Loja": "Loja",
-        "Cliente/Fornecedor": "Cliente / Fornecedor",
-        "Plano de Contas": "Plano de Contas",
-        "Status_Clean": "Status",
-    }
-    d = d.rename(columns=rename)
-
-    # Depois do rename pode surgir uma nova duplicidade, por exemplo se
-    # o F360 já possuir uma coluna chamada "Status". Resolve novamente.
-    d = d.loc[:, ~d.columns.duplicated(keep="first")].copy()
-
-    # Segurança adicional: nomes únicos para qualquer combinação de
-    # colunas inesperada que venha da API.
-    nomes = []
-    contagem = {}
-    for nome in d.columns:
-        nome = str(nome)
-        if nome not in contagem:
-            contagem[nome] = 0
-            nomes.append(nome)
-        else:
-            contagem[nome] += 1
-            nomes.append(f"{nome}_{contagem[nome]}")
-    d.columns = nomes
-
-    return d
-
-
-def render_movement_cards(
-    previsto,
-    liquidado,
-    aberto,
-    titulo="Lançamentos",
-    df_detail=None,
-    state_prefix="mov"
-):
-    """Cards clicáveis + caixa de títulos com botão Fechar."""
+def render_movement_cards(previsto, liquidado, aberto, titulo="Lançamentos"):
+    """Cards padronizados para mostrar previsto, liquidado e em aberto."""
     c1, c2, c3 = st.columns(3)
 
-    cards = [
-        (c1, "PREVISTO", previsto, "kpi-blue", "Todos os títulos do período", "ALL"),
-        (c2, "LIQUIDADO", liquidado, "kpi-green", "Valores já realizados", "REALIZADO"),
-        (
-            c3,
-            "EM ABERTO",
-            aberto,
-            "kpi-yellow" if aberto > 0 else "kpi-green",
-            "Previsto ainda não liquidado",
-            "PENDENTE",
-        ),
-    ]
-
-    for col, label, value, color_class, foot, status in cards:
-        with col:
-            st.markdown(f"""
-            <div class="kpi-card">
-                <div class="kpi-label">
-                    {"📊" if status == "ALL" else "🟢" if status == "REALIZADO" else "🟡"}
-                    {titulo} · {label}
-                </div>
-                <div class="kpi-value {color_class}">{brl(value)}</div>
-                <div class="kpi-foot">{foot}</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-            # O botão fica imediatamente abaixo do card e dispara o painel.
-            if st.button(
-                f"Ver títulos · {label}",
-                key=f"{state_prefix}_{status}",
-                use_container_width=True
-            ):
-                st.session_state.show_kpi_data = f"{state_prefix}:{status}"
-
-    # O painel é renderizado depois dos três cards, evitando que um botão
-    # desapareça ou seja sobrescrito por outro rerun.
-    current = st.session_state.get("show_kpi_data")
-
-    if current and current.startswith(f"{state_prefix}:"):
-        status = current.split(":", 1)[1]
-        df_show = _preparar_titulos_detalhe(
-            df_detail,
-            None if status == "ALL" else status
-        )
-
-        st.markdown("""
-        <div style="
-            background:#11161D;
-            border:1px solid #303A46;
-            border-radius:12px;
-            padding:16px;
-            margin:14px 0 18px 0;
-        ">
+    with c1:
+        st.markdown(f"""
+        <div class="kpi-card">
+            <div class="kpi-label">📊 {titulo} · PREVISTO</div>
+            <div class="kpi-value kpi-blue">{brl(previsto)}</div>
+            <div class="kpi-foot">Total lançado para o período</div>
+        </div>
         """, unsafe_allow_html=True)
 
-        h1, h2 = st.columns([5, 1])
-        with h1:
-            nomes = {
-                "ALL": "Todos os títulos",
-                "REALIZADO": "Títulos liquidados",
-                "PENDENTE": "Títulos em aberto",
-            }
-            st.markdown(
-                f"### 📋 {titulo} · {nomes.get(status, status)}"
-            )
-        with h2:
-            if st.button(
-                "✕ Fechar",
-                key=f"{state_prefix}_close",
-                use_container_width=True
-            ):
-                st.session_state.show_kpi_data = None
-                st.rerun()
+    with c2:
+        st.markdown(f"""
+        <div class="kpi-card">
+            <div class="kpi-label">🟢 {titulo} · LIQUIDADO</div>
+            <div class="kpi-value kpi-green">{brl(liquidado)}</div>
+            <div class="kpi-foot">Valores já realizados</div>
+        </div>
+        """, unsafe_allow_html=True)
 
-        if df_show.empty:
-            st.info("Nenhum título encontrado para este status no período/loja selecionados.")
-        else:
-            if "Valor" in df_show.columns:
-                total = df_show["Valor"].sum()
-                st.caption(
-                    f"{len(df_show):,} título(s) · Total: {brl(total)}"
-                    .replace(",", ".")
-                )
-                st.dataframe(
-                    df_show.style.format({"Valor": "R$ {:,.2f}"}),
-                    use_container_width=True,
-                    hide_index=True
-                )
-            else:
-                st.dataframe(
-                    df_show,
-                    use_container_width=True,
-                    hide_index=True
-                )
-
-        st.markdown("</div>", unsafe_allow_html=True)
+    with c3:
+        aberto_class = "kpi-green" if aberto <= 0 else "kpi-yellow"
+        st.markdown(f"""
+        <div class="kpi-card">
+            <div class="kpi-label">🟡 {titulo} · EM ABERTO</div>
+            <div class="kpi-value {aberto_class}">{brl(aberto)}</div>
+            <div class="kpi-foot">Previsto ainda não liquidado</div>
+        </div>
+        """, unsafe_allow_html=True)
 
 # ============================================================
 # ESTADO
@@ -480,23 +324,43 @@ with st.sidebar:
 
     if st.button("🚀 Sincronizar API", use_container_width=True) and len(periodo_api) == 2:
         with st.spinner("Sincronizando dados do F360..."):
-            d_ini, d_fim = periodo_api[0].replace(day=1), periodo_api[1]
+            d_ini, d_fim = periodo_api[0], periodo_api[1]
 
+            log_desp = []
+            log_rec = []
             df_desp = buscar_parcelas_f360(
-                st.session_state.jwt, d_ini, d_fim, MAPA_CNPJ_LOJA, "Despesa"
+                st.session_state.jwt, d_ini, d_fim, MAPA_CNPJ_LOJA, "Despesa", log=log_desp
             )
             if not df_desp.empty:
                 df_desp["Categoria_CFO"] = df_desp["Plano de Contas"].apply(categorizar_plano_contas)
             st.session_state.df_api_desp = df_desp
+            st.session_state.log_api_desp = log_desp
 
             df_rec = buscar_parcelas_f360(
-                st.session_state.jwt, d_ini, d_fim, MAPA_CNPJ_LOJA, "Receita"
+                st.session_state.jwt, d_ini, d_fim, MAPA_CNPJ_LOJA, "Receita", log=log_rec
             )
             if not df_rec.empty:
                 df_rec["Categoria_CFO"] = df_rec.apply(categorizar_receita, axis=1)
                 df_rec["Tipo_Movimento"] = "RECEITA"
             st.session_state.df_api_rec = df_rec
-            st.success("🟢 API F360 sincronizada!")
+            st.session_state.log_api_rec = log_rec
+            st.session_state.log_api_periodo = (d_ini, d_fim)
+            st.success(f"🟢 API F360 sincronizada! Despesas: {len(df_desp):,} linhas | Receitas: {len(df_rec):,} linhas")
+
+    with st.expander("🔎 LOG / DIAGNÓSTICO DA API F360", expanded=False):
+        logs_d = st.session_state.get("log_api_desp", [])
+        logs_r = st.session_state.get("log_api_rec", [])
+        periodo_log = st.session_state.get("log_api_periodo")
+        if periodo_log:
+            st.caption(f"Período consultado: {periodo_log[0]:%d/%m/%Y} até {periodo_log[1]:%d/%m/%Y}")
+        if logs_d:
+            st.markdown("**DESPESAS**")
+            st.code("\n".join(logs_d), language="text")
+        if logs_r:
+            st.markdown("**RECEITAS**")
+            st.code("\n".join(logs_r), language="text")
+        if not logs_d and not logs_r:
+            st.info("Clique em '🚀 Sincronizar API' para gerar o log.")
 
     st.divider()
     st.markdown("### 🏦 Dados oficiais do caixa")
@@ -959,14 +823,7 @@ with tabs[1]:
             )
 
             st.markdown("#### Lançamentos do período")
-            render_movement_cards(
-                prev_cards,
-                liq_cards,
-                aberto_cards,
-                "Despesas",
-                df_detail=desp_cards,
-                state_prefix="fluxo_despesas"
-            )
+            render_movement_cards(prev_cards, liq_cards, aberto_cards, "Despesas")
 
             st.caption(
                 "Previsto = todos os lançamentos de despesa; "
@@ -978,14 +835,7 @@ with tabs[1]:
             entradas = df_cards["Total_Entradas"].sum() if not df_cards.empty else 0.0
             saidas = df_cards["Total_Saidas"].sum() if not df_cards.empty else 0.0
             st.markdown("#### Movimentação oficial do caixa")
-            render_movement_cards(
-                saidas,
-                saidas,
-                0.0,
-                "Saídas",
-                df_detail=None,
-                state_prefix="fluxo_oficial"
-            )
+            render_movement_cards(saidas, saidas, 0.0, "Saídas")
             st.caption("Para separar previsto, liquidado e em aberto, sincronize a API F360.")
             st.markdown("<br>", unsafe_allow_html=True)
     else:
@@ -1065,9 +915,7 @@ with tabs[2]:
             rec_prev_dre,
             rec_liq_dre,
             rec_aberto_dre,
-            "Receitas",
-            df_detail=df_rec_kpi,
-            state_prefix="dre_receitas"
+            "Receitas"
         )
 
         st.markdown("<br>", unsafe_allow_html=True)
@@ -1076,9 +924,7 @@ with tabs[2]:
             desp_prev_dre,
             desp_liq_dre,
             desp_aberto_dre,
-            "Despesas",
-            df_detail=df_desp_kpi,
-            state_prefix="dre_despesas"
+            "Despesas"
         )
 
         st.caption(
