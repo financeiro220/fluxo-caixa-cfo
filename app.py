@@ -10,7 +10,6 @@ from f360_api import (
     processar_fluxo_de_caixa_oficial
 )
 
-# Tenta importar o processar CSV do navegador caso esteja usando a versão mais recente do f360_api.py
 try:
     from f360_api import processar_tabela_fluxo_dom
     HAS_DOM_PROCESSOR = True
@@ -77,7 +76,10 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-F360_TOKEN = "11001cbb-792d-45e5-b2f9-03ffc46fe7ed"
+try:
+    F360_TOKEN = st.secrets["F360_TOKEN"]
+except:
+    F360_TOKEN = "11001cbb-792d-45e5-b2f9-03ffc46fe7ed"
 
 MAPA_CNPJ_LOJA = {
     "36240923000168": "4- PANTANAL",
@@ -185,7 +187,8 @@ def render_movement_cards(previsto, liquidado, aberto, titulo="Lançamentos", df
                 st.session_state.show_kpi_data = f"{state_prefix}:{status}"
 
     current = st.session_state.get("show_kpi_data")
-    if current and current.startswith(f"{state_prefix}:"):
+    
+    if isinstance(current, str) and current.startswith(f"{state_prefix}:"):
         status = current.split(":", 1)[1]
         df_show = _preparar_titulos_detalhe(df_detail, None if status == "ALL" else status)
 
@@ -195,7 +198,6 @@ def render_movement_cards(previsto, liquidado, aberto, titulo="Lançamentos", df
             nomes = {"ALL": "Todos os títulos", "REALIZADO": "Títulos liquidados", "PENDENTE": "Títulos em aberto"}
             st.markdown(f"### 📋 {titulo} · {nomes.get(status, status)}")
         with h2:
-            # FIX: Chave estritamente única para evitar o StreamlitDuplicateElementKey
             if st.button("✕ Fechar", key=f"fechar_box_{state_prefix}_{status}", use_container_width=True):
                 st.session_state.show_kpi_data = None
                 st.rerun()
@@ -246,7 +248,6 @@ with st.sidebar:
             st.session_state.log_api_periodo = (d_ini, d_fim)
             st.success(f"🟢 API sincronizada! Despesas: {len(df_desp):,} | Receitas: {len(df_rec):,}")
 
-    # FIX: Restaurando o Log na Interface
     with st.expander("🔎 LOG / DIAGNÓSTICO DA API F360", expanded=False):
         logs_d = st.session_state.get("log_api_desp", [])
         logs_r = st.session_state.get("log_api_rec", [])
@@ -276,7 +277,7 @@ _lista_dfs = [d for d in [st.session_state.get("df_api_desp"), st.session_state.
 df_api = pd.concat(_lista_dfs, ignore_index=True) if _lista_dfs else pd.DataFrame()
 
 # ============================================================
-# CABEÇALHO
+# CABEÇALHO E FILTROS
 # ============================================================
 st.markdown("""
 <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:20px;">
@@ -285,9 +286,6 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# ============================================================
-# FILTROS
-# ============================================================
 f1, f2 = st.columns([2.2, 1])
 with f1:
     opcoes_conta = ["Ver Todas as Contas", "17 Pantanal Itaú", "51 Estação Itaú", "61 Itaú Goiabeiras", "52 RT", "36 MJL"]
@@ -304,7 +302,7 @@ with f2:
     date_range = st.date_input("Período", value=(min_d, max_d), format="DD/MM/YYYY")
 
 # ============================================================
-# FILTRO API
+# FILTRO API E VARIÁVEIS GLOBAIS
 # ============================================================
 df_kpi = df_api.copy()
 if not df_kpi.empty:
@@ -320,9 +318,6 @@ tot_prev = df_desp_kpi['Valor'].sum() if not df_desp_kpi.empty else 0.0
 tot_real = df_desp_kpi[df_desp_kpi['Status_Clean'] == 'REALIZADO']['Valor'].sum() if not df_desp_kpi.empty else 0.0
 tot_pend = df_desp_kpi[df_desp_kpi['Status_Clean'] == 'PENDENTE']['Valor'].sum() if not df_desp_kpi.empty else 0.0
 
-# ============================================================
-# DADOS OFICIAIS DO CAIXA PARA A VISÃO EXECUTIVA
-# ============================================================
 oficial = fluxo_oficial.get(conta_selecionada) or fluxo_oficial.get("Ver Todas as Contas") or fluxo_oficial.get("CSV (via navegador)")
 if not oficial and len(fluxo_oficial) == 1: oficial = list(fluxo_oficial.values())[0]
 
@@ -376,22 +371,41 @@ with tabs[0]:
             st.bar_chart(comp, height=280)
         else: st.info("Sincronize a API para visualizar a composição das despesas.")
 
+    # RESTAURAÇÃO: Tabelas da Visão Executiva
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown('<div class="section-title">🏪 Resultado por Loja</div>', unsafe_allow_html=True)
+    if not df_api.empty:
+        df_loja_exec = df_kpi.copy()
+        dimensao_exec = "Empresa_Loja" if ("Empresa_Loja" in df_loja_exec.columns and df_loja_exec["Empresa_Loja"].replace("", np.nan).notna().any()) else "Empresa"
+        rec_loja = df_loja_exec[(df_loja_exec["Tipo_Movimento"] == "RECEITA") & (df_loja_exec["Categoria_CFO"] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")].groupby(dimensao_exec)["Valor"].sum()
+        desp_loja = df_loja_exec[(df_loja_exec["Tipo_Movimento"] == "DESPESA") & (df_loja_exec["Categoria_CFO"] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")].groupby(dimensao_exec)["Valor"].sum()
+        resumo_loja = pd.concat([rec_loja.rename("Entradas"), desp_loja.rename("Saídas")], axis=1).fillna(0)
+        resumo_loja["Resultado"] = resumo_loja["Entradas"] - resumo_loja["Saídas"]
+        resumo_loja = resumo_loja.sort_values("Resultado", ascending=False)
+        st.dataframe(resumo_loja.style.format("R$ {:,.2f}"), use_container_width=True, hide_index=False)
+    else: st.info("Sincronize a API para gerar o comparativo por loja.")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown('<div class="section-title">📅 Projeção do Caixa</div>', unsafe_allow_html=True)
+    if not df_of_exec.empty:
+        proj = df_of_exec[["Data", "Total_Entradas", "Total_Saidas", "Saldo"]].copy()
+        proj.columns = ["Data", "Entradas", "Saídas", "Saldo"]
+        st.dataframe(proj.tail(10).style.format({"Entradas": "R$ {:,.2f}", "Saídas": "R$ {:,.2f}", "Saldo": "R$ {:,.2f}"}), use_container_width=True, hide_index=True)
+    else: st.info("A projeção diária utiliza os dados do export oficial do Fluxo de Caixa F360.")
+
 with tabs[1]:
     st.subheader("Matriz Diária — Valores 100% Espelhados do F360")
     if oficial:
         df_cards = oficial["df"].copy()
         if isinstance(date_range, tuple) and len(date_range) == 2: df_cards = df_cards[(df_cards["Data"].dt.date >= date_range[0]) & (df_cards["Data"].dt.date <= date_range[1])]
 
+        # RESTAURAÇÃO: Garantir que os cards do Fluxo Diário puxam a API corretamente se ela estiver lá
         if not df_api.empty:
-            df_cards_api = df_api.copy()
-            if isinstance(date_range, tuple) and len(date_range) == 2: df_cards_api = df_cards_api[(df_cards_api["Vencimento_dt"].dt.date >= date_range[0]) & (df_cards_api["Vencimento_dt"].dt.date <= date_range[1])]
-            if conta_selecionada not in ("Ver Todas as Contas", "CSV (via navegador)"): df_cards_api = df_cards_api[df_cards_api["Empresa"] == conta_selecionada]
-            
+            df_cards_api = df_kpi.copy()
             desp_cards = df_cards_api[(df_cards_api["Tipo_Movimento"] == "DESPESA") & (df_cards_api["Categoria_CFO"] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")]
             prev_cards = desp_cards["Valor"].sum() if not desp_cards.empty else 0.0
             liq_cards = desp_cards[desp_cards["Status_Clean"] == "REALIZADO"]["Valor"].sum() if not desp_cards.empty else 0.0
             aberto_cards = desp_cards[desp_cards["Status_Clean"] == "PENDENTE"]["Valor"].sum() if not desp_cards.empty else max(prev_cards - liq_cards, 0)
-            
             st.markdown("#### Lançamentos do período")
             render_movement_cards(prev_cards, liq_cards, aberto_cards, "Despesas", df_detail=desp_cards, state_prefix="fluxo_despesas")
         else:
@@ -451,8 +465,7 @@ with tabs[2]:
 with tabs[3]:
     st.subheader("Comparativo Por Loja — Vendas e Despesas")
     if not df_api.empty:
-        df_filtered_loja = df_api.copy()
-        if isinstance(date_range, tuple) and len(date_range) == 2: df_filtered_loja = df_filtered_loja[(df_filtered_loja["Vencimento_dt"].dt.date >= date_range[0]) & (df_filtered_loja["Vencimento_dt"].dt.date <= date_range[1])]
+        df_filtered_loja = df_kpi.copy()
         tem_loja = "Empresa_Loja" in df_filtered_loja.columns and df_filtered_loja["Empresa_Loja"].replace("", np.nan).notna().any()
         dimensao = "Empresa_Loja" if tem_loja else "Empresa"
         if not tem_loja: st.warning("Sem dado de loja de origem nos lançamentos carregados. Mostrando por conta bancária de liquidação.")
