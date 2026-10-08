@@ -1,6 +1,6 @@
 """
 f360_api.py - Integração com a API pública do F360.
-Inclui leitura exata do Rateio e alinhamento nativo de Vencimentos.
+Inclui leitura exata do Rateio, proteção em cartões e leitura de datas corrigida (fim da inversão de meses).
 """
 import json
 import re
@@ -73,11 +73,14 @@ def _data(v):
     if isinstance(v, str):
         s = v.strip()
         if not s: return pd.NaT
+        # Tenta formato explícito brasileiro (DD/MM/YYYY)
         m = re.search(r"(\d{2})/(\d{2})/(\d{4})", s)
         if m:
             d, m_m, y = m.groups()
             return pd.to_datetime(f"{y}-{m_m}-{d}", errors="coerce")
-        return pd.to_datetime(s, dayfirst=True, errors="coerce")
+        # Se for string ISO nativa da API (YYYY-MM-DD), processa sem inverter mês e dia
+        return pd.to_datetime(s, errors="coerce")
+    
     ts = pd.to_datetime(v, errors="coerce")
     if pd.notna(ts) and getattr(ts, "tzinfo", None) is not None:
         ts = ts.tz_localize(None)
@@ -198,7 +201,7 @@ def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
     df["Vencimento_real"] = pd.to_datetime(df["Vencimento_real"], errors="coerce")
     df["Liquidacao_dt"] = pd.to_datetime(df["Liquidacao_dt"], errors="coerce")
 
-    # FIX: Títulos PENDENTES ficam estritamente no seu dia de Vencimento
+    # FIX: Títulos PENDENTES ficam no seu dia de Vencimento
     # Títulos REALIZADOS vão para o dia em que o banco os liquidou
     df["Vencimento_dt"] = df["Vencimento_real"]
     mascara_realizado = df["Status_Clean"].eq("REALIZADO") & df["Liquidacao_dt"].notna()
