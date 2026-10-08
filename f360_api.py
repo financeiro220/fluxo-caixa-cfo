@@ -288,23 +288,25 @@ def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
     df["Liquidacao_dt"] = pd.to_datetime(df["Liquidacao_dt"], errors="coerce")
 
     # DATA USADA PELO FLUXO DE CAIXA:
-    # A coluna "Liquidacao" do F360 representa a data em que o valor está
-    # previsto/agenda para movimentar o caixa. Portanto, ela deve ser usada
-    # para POSICIONAR o título no calendário mesmo quando o status ainda é
-    # PENDENTE/AGENDADO.
+    # - Títulos PENDENTES/AGENDADOS permanecem na data ORIGINAL de VENCIMENTO.
+    # - Títulos REALIZADOS usam a DATA EFETIVA DE LIQUIDAÇÃO.
     #
-    # O STATUS é tratado separadamente acima e continua dizendo se o valor já
-    # foi realizado ou ainda está em aberto.
+    # Exemplo:
+    #   Agendado + vencimento 03/10 + liquidação/agendamento 09/10
+    #       -> 03/10 como EM ABERTO
     #
-    # Assim:
-    #   - Agendado + Liquidação 01/10 -> aparece em 01/10 como EM ABERTO
-    #   - Agendado + Liquidação 09/10 -> aparece em 09/10 como EM ABERTO
-    #   - Liquidado + Liquidação 09/10 -> aparece em 09/10 como LIQUIDADO
-    #   - sem Liquidação -> usa o Vencimento.
-    df["Vencimento_dt"] = df["Liquidacao_dt"].where(
-        df["Liquidacao_dt"].notna(),
-        df["Vencimento_real"]
+    #   Liquidado + vencimento 03/10 + liquidação 09/10
+    #       -> 09/10 como LIQUIDADO
+    #
+    # Isso evita deslocar previsões de 01-07/10 para uma data futura.
+    df["Vencimento_dt"] = df["Vencimento_real"]
+    mascara_realizado = (
+        df["Status_Clean"].eq("REALIZADO")
+        & df["Liquidacao_dt"].notna()
     )
+    df.loc[mascara_realizado, "Vencimento_dt"] = df.loc[
+        mascara_realizado, "Liquidacao_dt"
+    ]
     df = df.dropna(subset=["Vencimento_dt"]).copy()
     df["Dia"] = df["Vencimento_dt"].dt.day
     return df
