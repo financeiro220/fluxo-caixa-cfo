@@ -264,37 +264,80 @@ def highlight_saldo(row):
 def brl(v):
     return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-def render_movement_cards(previsto, liquidado, aberto, titulo="Lançamentos"):
-    """Cards padronizados para mostrar previsto, liquidado e em aberto."""
+def render_movement_cards(previsto, liquidado, aberto, titulo="Lançamentos", df_detalhes=None, state_key="movimentos"):
+    """Cards com botões para abrir os lançamentos correspondentes."""
     c1, c2, c3 = st.columns(3)
 
-    with c1:
-        st.markdown(f"""
-        <div class="kpi-card">
-            <div class="kpi-label">📊 {titulo} · PREVISTO</div>
-            <div class="kpi-value kpi-blue">{brl(previsto)}</div>
-            <div class="kpi-foot">Total lançado para o período</div>
-        </div>
-        """, unsafe_allow_html=True)
+    botoes = [
+        (c1, "PREVISTO", previsto, "todos"),
+        (c2, "LIQUIDADO", liquidado, "realizado"),
+        (c3, "EM ABERTO", aberto, "pendente"),
+    ]
 
-    with c2:
-        st.markdown(f"""
-        <div class="kpi-card">
-            <div class="kpi-label">🟢 {titulo} · LIQUIDADO</div>
-            <div class="kpi-value kpi-green">{brl(liquidado)}</div>
-            <div class="kpi-foot">Valores já realizados</div>
-        </div>
-        """, unsafe_allow_html=True)
+    for col, rotulo, valor, filtro in botoes:
+        with col:
+            classe = "kpi-blue" if rotulo == "PREVISTO" else ("kpi-green" if rotulo == "LIQUIDADO" else ("kpi-green" if valor <= 0 else "kpi-yellow"))
+            st.markdown(f"""
+            <div class="kpi-card">
+                <div class="kpi-label">{'📊' if rotulo == 'PREVISTO' else ('🟢' if rotulo == 'LIQUIDADO' else '🟡')} {titulo} · {rotulo}</div>
+                <div class="kpi-value {classe}">{brl(valor)}</div>
+                <div class="kpi-foot">Clique abaixo para ver os lançamentos</div>
+            </div>
+            """, unsafe_allow_html=True)
+            if st.button(f"🔎 Ver lançamentos", key=f"{state_key}_{filtro}", use_container_width=True):
+                st.session_state["show_kpi_data"] = {
+                    "key": state_key,
+                    "titulo": titulo,
+                    "filtro": filtro,
+                    "df": df_detalhes.copy() if df_detalhes is not None else pd.DataFrame(),
+                }
 
-    with c3:
-        aberto_class = "kpi-green" if aberto <= 0 else "kpi-yellow"
-        st.markdown(f"""
-        <div class="kpi-card">
-            <div class="kpi-label">🟡 {titulo} · EM ABERTO</div>
-            <div class="kpi-value {aberto_class}">{brl(aberto)}</div>
-            <div class="kpi-foot">Previsto ainda não liquidado</div>
-        </div>
-        """, unsafe_allow_html=True)
+
+def mostrar_detalhes_card():
+    """Exibe a lista de lançamentos do card selecionado."""
+    detalhe = st.session_state.get("show_kpi_data")
+    if not detalhe:
+        return
+
+    df = detalhe.get("df", pd.DataFrame()).copy()
+    filtro = detalhe.get("filtro")
+
+    if not df.empty and filtro != "todos":
+        df = df[df["Status_Clean"] == ("REALIZADO" if filtro == "realizado" else "PENDENTE")].copy()
+
+    st.markdown("---")
+    col_t, col_b = st.columns([5, 1])
+    with col_t:
+        st.markdown(f"### 📋 {detalhe.get('titulo', 'Lançamentos')} — {filtro.upper()}")
+    with col_b:
+        if st.button("✖ Fechar", key=f"fechar_{detalhe.get('key', 'movimentos')}", use_container_width=True):
+            st.session_state["show_kpi_data"] = None
+            st.rerun()
+
+    if df.empty:
+        st.info("Nenhum lançamento encontrado para este card no período/conta selecionados.")
+        return
+
+    colunas_preferidas = [
+        "Vencimento_dt", "Empresa", "Empresa_Loja", "Categoria_CFO",
+        "Status_F360", "Status_Clean", "Valor", "Numero_Titulo",
+        "Fornecedor", "Cliente", "Descricao"
+    ]
+    cols = [c for c in colunas_preferidas if c in df.columns]
+    if not cols:
+        cols = list(df.columns)
+
+    exib = df[cols].copy()
+    if "Vencimento_dt" in exib.columns:
+        exib["Vencimento_dt"] = pd.to_datetime(exib["Vencimento_dt"], errors="coerce").dt.strftime("%d/%m/%Y")
+    if "Valor" in exib.columns:
+        exib["Valor"] = pd.to_numeric(exib["Valor"], errors="coerce").fillna(0)
+
+    st.caption(f"{len(exib):,} lançamento(s) encontrado(s) • Total: {brl(exib['Valor'].sum()) if 'Valor' in exib.columns else '—'}")
+    if "Valor" in exib.columns:
+        st.dataframe(exib.style.format({"Valor": "R$ {:,.2f}"}), use_container_width=True, hide_index=True)
+    else:
+        st.dataframe(exib, use_container_width=True, hide_index=True)
 
 # ============================================================
 # ESTADO
@@ -325,16 +368,14 @@ with st.sidebar:
     if st.button("🚀 Sincronizar API", use_container_width=True) and len(periodo_api) == 2:
         with st.spinner("Sincronizando dados do F360..."):
             d_ini, d_fim = periodo_api[0], periodo_api[1]
+            log_desp, log_rec = [], []
 
-            log_desp = []
-            log_rec = []
             df_desp = buscar_parcelas_f360(
                 st.session_state.jwt, d_ini, d_fim, MAPA_CNPJ_LOJA, "Despesa", log=log_desp
             )
             if not df_desp.empty:
                 df_desp["Categoria_CFO"] = df_desp["Plano de Contas"].apply(categorizar_plano_contas)
             st.session_state.df_api_desp = df_desp
-            st.session_state.log_api_desp = log_desp
 
             df_rec = buscar_parcelas_f360(
                 st.session_state.jwt, d_ini, d_fim, MAPA_CNPJ_LOJA, "Receita", log=log_rec
@@ -343,24 +384,16 @@ with st.sidebar:
                 df_rec["Categoria_CFO"] = df_rec.apply(categorizar_receita, axis=1)
                 df_rec["Tipo_Movimento"] = "RECEITA"
             st.session_state.df_api_rec = df_rec
-            st.session_state.log_api_rec = log_rec
-            st.session_state.log_api_periodo = (d_ini, d_fim)
+            st.session_state.log_desp = log_desp
+            st.session_state.log_rec = log_rec
             st.success(f"🟢 API F360 sincronizada! Despesas: {len(df_desp):,} linhas | Receitas: {len(df_rec):,} linhas")
 
-    with st.expander("🔎 LOG / DIAGNÓSTICO DA API F360", expanded=False):
-        logs_d = st.session_state.get("log_api_desp", [])
-        logs_r = st.session_state.get("log_api_rec", [])
-        periodo_log = st.session_state.get("log_api_periodo")
-        if periodo_log:
-            st.caption(f"Período consultado: {periodo_log[0]:%d/%m/%Y} até {periodo_log[1]:%d/%m/%Y}")
-        if logs_d:
-            st.markdown("**DESPESAS**")
-            st.code("\n".join(logs_d), language="text")
-        if logs_r:
-            st.markdown("**RECEITAS**")
-            st.code("\n".join(logs_r), language="text")
-        if not logs_d and not logs_r:
-            st.info("Clique em '🚀 Sincronizar API' para gerar o log.")
+            with st.expander("🔎 LOG / DIAGNÓSTICO DA API F360"):
+                st.caption(f"Período consultado: {d_ini.strftime('%d/%m/%Y')} até {d_fim.strftime('%d/%m/%Y')}")
+                st.markdown("**DESPESAS**")
+                st.code("\n".join(log_desp) if log_desp else "Sem log.")
+                st.markdown("**RECEITAS**")
+                st.code("\n".join(log_rec) if log_rec else "Sem log.")
 
     st.divider()
     st.markdown("### 🏦 Dados oficiais do caixa")
@@ -796,34 +829,20 @@ with tabs[1]:
         # Para os cards de lançamentos, cruzamos com a API quando disponível:
         # previsto = API; liquidado = REALIZADO; aberto = PENDENTE.
         if not df_api.empty:
-            df_cards_api = df_api.copy()
-            if isinstance(date_range, tuple) and len(date_range) == 2:
-                df_cards_api = df_cards_api[
-                    (df_cards_api["Vencimento_dt"].dt.date >= date_range[0]) &
-                    (df_cards_api["Vencimento_dt"].dt.date <= date_range[1])
-                ]
-
-            if conta_selecionada not in ("Ver Todas as Contas", "CSV (via navegador)"):
-                df_cards_api = df_cards_api[df_cards_api["Empresa"] == conta_selecionada]
-
-            # Despesas são as que têm os três estados de lançamento mais relevantes.
-            desp_cards = df_cards_api[
-                (df_cards_api["Tipo_Movimento"] == "DESPESA") &
-                (df_cards_api["Categoria_CFO"] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")
-            ]
+            # IMPORTANTE: usar exatamente o mesmo df_desp_kpi da Visão Executiva/DRE.
+            # Assim o Fluxo Diário não aplica uma segunda filtragem diferente.
+            desp_cards = df_desp_kpi.copy()
 
             prev_cards = desp_cards["Valor"].sum() if not desp_cards.empty else 0.0
-            liq_cards = (
-                desp_cards[desp_cards["Status_Clean"] == "REALIZADO"]["Valor"].sum()
-                if not desp_cards.empty else 0.0
-            )
-            aberto_cards = (
-                desp_cards[desp_cards["Status_Clean"] == "PENDENTE"]["Valor"].sum()
-                if not desp_cards.empty else max(prev_cards - liq_cards, 0)
-            )
+            liq_cards = desp_cards.loc[desp_cards["Status_Clean"] == "REALIZADO", "Valor"].sum() if not desp_cards.empty else 0.0
+            aberto_cards = desp_cards.loc[desp_cards["Status_Clean"] == "PENDENTE", "Valor"].sum() if not desp_cards.empty else 0.0
 
             st.markdown("#### Lançamentos do período")
-            render_movement_cards(prev_cards, liq_cards, aberto_cards, "Despesas")
+            render_movement_cards(
+                prev_cards, liq_cards, aberto_cards, "Despesas",
+                df_detalhes=desp_cards, state_key="fluxo_despesas"
+            )
+            mostrar_detalhes_card()
 
             st.caption(
                 "Previsto = todos os lançamentos de despesa; "
@@ -912,20 +931,18 @@ with tabs[2]:
         )
 
         render_movement_cards(
-            rec_prev_dre,
-            rec_liq_dre,
-            rec_aberto_dre,
-            "Receitas"
+            rec_prev_dre, rec_liq_dre, rec_aberto_dre, "Receitas",
+            df_detalhes=df_rec_kpi, state_key="dre_receitas"
         )
+        mostrar_detalhes_card()
 
         st.markdown("<br>", unsafe_allow_html=True)
 
         render_movement_cards(
-            desp_prev_dre,
-            desp_liq_dre,
-            desp_aberto_dre,
-            "Despesas"
+            desp_prev_dre, desp_liq_dre, desp_aberto_dre, "Despesas",
+            df_detalhes=df_desp_kpi, state_key="dre_despesas"
         )
+        mostrar_detalhes_card()
 
         st.caption(
             "Os cards usam os lançamentos da API F360 respeitando a conta/loja e o período selecionados."
