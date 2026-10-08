@@ -607,11 +607,38 @@ def buscar_parcelas_f360(jwt, d_ini, d_fim, mapa_cnpj, tipo="Despesa",
         for ini, fim in janelas:
             rotulo = f"Títulos {tipo} / {td} {ini:%d/%m/%Y} a {fim:%d/%m/%Y}"
             try:
-                itens = _listar_titulos(jwt, tipo, ini, fim, td, cnpjs)
-                log.append(f"{rotulo}: {len(itens)} parcelas de títulos")
-                if not itens:
-                    todos = _listar_titulos(jwt, tipo, ini, fim, td, [])
-                    itens = [p for p in todos if _da_rede(p, {_so_digitos(c) for c in mapa_cnpj})]
+                # Primeiro consulta com CNPJ. Depois faz também a consulta ampla
+                # e une os registros das empresas desejadas. Isso evita perder
+                # títulos quando o filtro "empresas" da API retorna apenas parte
+                # dos registros.
+                itens_filtrados = _listar_titulos(jwt, tipo, ini, fim, td, cnpjs)
+                todos = _listar_titulos(jwt, tipo, ini, fim, td, [])
+                digitos_alvo = {_so_digitos(c) for c in mapa_cnpj}
+                itens_amplos = [p for p in todos if _da_rede(p, digitos_alvo)]
+
+                por_id = {}
+                for p in itens_filtrados + itens_amplos:
+                    pid = p.get("ParcelaId")
+                    if pid:
+                        por_id[("id", str(pid))] = p
+                    else:
+                        tit = p.get("DadosDoTitulo") or {}
+                        chave = (
+                            "sem_id",
+                            _so_digitos((tit.get("Empresa") or {}).get("Inscricao")),
+                            str(p.get("Numero") or tit.get("NumeroDoTitulo") or ""),
+                            str(p.get("Vencimento") or ""),
+                            str(p.get("ValorBruto") or ""),
+                            str(p.get("Liquidacao") or ""),
+                        )
+                        por_id[chave] = p
+
+                itens = list(por_id.values())
+                log.append(
+                    f"{rotulo}: filtro CNPJ={len(itens_filtrados)} | "
+                    f"consulta ampla={len(todos)} | após CNPJ={len(itens_amplos)} | "
+                    f"união={len(itens)}"
+                )
             except Exception as e:
                 log.append(f"{rotulo}: ERRO -> {e}")
                 itens = []
