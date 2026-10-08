@@ -124,6 +124,15 @@ def highlight_saldo(row):
 def brl(v):
     return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
+def formatar_dataframe_brl(df):
+    """Formata colunas numéricas de um dataframe para string BRL para exibição garantida"""
+    if df is None or df.empty: return df
+    df_show = df.copy()
+    for col in df_show.columns:
+        if pd.api.types.is_numeric_dtype(df_show[col]):
+            df_show[col] = df_show[col].apply(lambda x: f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    return df_show
+
 def _preparar_titulos_detalhe(df, status=None):
     if df is None or df.empty: return pd.DataFrame()
     d = df.copy()
@@ -206,8 +215,8 @@ def render_movement_cards(previsto, liquidado, aberto, titulo="Lançamentos", df
         else:
             if "Valor" in df_show.columns:
                 total = df_show["Valor"].sum()
-                st.caption(f"{len(df_show):,} título(s) · Total: {brl(total)}".replace(",", "."))
-                st.dataframe(df_show.style.format({"Valor": "R$ {:,.2f}"}), use_container_width=True, hide_index=True)
+                st.caption(f"{len(df_show):,} título(s) · Total: {brl(total)}")
+                st.dataframe(formatar_dataframe_brl(df_show), use_container_width=True, hide_index=True)
             else:
                 st.dataframe(df_show, use_container_width=True, hide_index=True)
         st.markdown("</div>", unsafe_allow_html=True)
@@ -261,7 +270,7 @@ with st.sidebar:
     st.caption("🔐 A fonte oficial do saldo bancário continua sendo o export do Fluxo de Caixa do F360.")
 
 # ============================================================
-# CARREGA ARQUIVOS
+# CARREGA ARQUIVOS E CABEÇALHO
 # ============================================================
 if file_fluxo_oficial: st.session_state.fluxo_oficial_cache.update(carregar_fluxo_oficial(file_fluxo_oficial))
 if file_tabela_csv is not None and HAS_DOM_PROCESSOR:
@@ -272,9 +281,6 @@ fluxo_oficial = st.session_state.fluxo_oficial_cache
 _lista_dfs = [d for d in [st.session_state.get("df_api_desp"), st.session_state.get("df_api_rec")] if d is not None and not d.empty]
 df_api = pd.concat(_lista_dfs, ignore_index=True) if _lista_dfs else pd.DataFrame()
 
-# ============================================================
-# CABEÇALHO E FILTROS
-# ============================================================
 st.markdown("""
 <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:20px;">
     <div><div class="hero-title">🍦 BORELLI</div><div class="hero-subtitle">Fluxo de Caixa · Controladoria</div></div>
@@ -377,10 +383,7 @@ with tabs[0]:
         resumo_loja = pd.concat([rec_loja.rename("Entradas"), desp_loja.rename("Saídas")], axis=1).fillna(0)
         resumo_loja["Resultado"] = resumo_loja["Entradas"] - resumo_loja["Saídas"]
         resumo_loja = resumo_loja.sort_values("Resultado", ascending=False)
-        try:
-            st.dataframe(resumo_loja.style.format("R$ {:,.2f}"), use_container_width=True)
-        except Exception:
-            st.dataframe(resumo_loja, use_container_width=True)
+        st.dataframe(formatar_dataframe_brl(resumo_loja), use_container_width=True)
     else: st.info("Sincronize a API para gerar o comparativo por loja.")
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -388,10 +391,7 @@ with tabs[0]:
     if not df_of_exec.empty:
         proj = df_of_exec[["Data", "Total_Entradas", "Total_Saidas", "Saldo"]].copy()
         proj.columns = ["Data", "Entradas", "Saídas", "Saldo"]
-        try:
-            st.dataframe(proj.tail(10).style.format({"Entradas": "R$ {:,.2f}", "Saídas": "R$ {:,.2f}", "Saldo": "R$ {:,.2f}"}), use_container_width=True, hide_index=True)
-        except Exception:
-            st.dataframe(proj.tail(10), use_container_width=True, hide_index=True)
+        st.dataframe(formatar_dataframe_brl(proj.tail(10)), use_container_width=True, hide_index=True)
     else: st.info("A projeção diária utiliza os dados do export oficial do Fluxo de Caixa F360.")
 
 with tabs[1]:
@@ -426,10 +426,12 @@ with tabs[1]:
             {"Linha de Extrato": "6. 🏦 SALDO FINAL BANCÁRIO", **dict(zip(df_cards["Dia"], df_cards.get("Saldo", 0)))},
         ]
         df_display = pd.DataFrame(linhas_of)[["Linha de Extrato"] + dias_of]
-        try:
-            st.dataframe(df_display.style.apply(highlight_saldo, axis=1).format({d: "R$ {:,.2f}" for d in dias_of}), use_container_width=True, hide_index=True)
-        except Exception:
-            st.dataframe(df_display, use_container_width=True, hide_index=True)
+        
+        def format_currency(val):
+            if isinstance(val, (int, float)): return f"R$ {val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            return val
+            
+        st.dataframe(df_display.style.apply(highlight_saldo, axis=1).format({d: format_currency for d in dias_of}), use_container_width=True, hide_index=True)
 
 with tabs[2]:
     st.subheader("DRE de Caixa — Visão Gerencial por Plano de Contas")
@@ -462,10 +464,7 @@ with tabs[2]:
         dre_list.append({"Categoria CFO": "8. TOTAL SAÍDAS", "Previsto (R$)": f"R$ {tot_saidas_prev:,.2f}", "Realizado (R$)": f"R$ {tot_saidas_real:,.2f}", "Variação (R$)": f"R$ {tot_saidas_real - tot_saidas_prev:,.2f}"})
         res_prev, res_real = tot_rec_prev - tot_saidas_prev, tot_rec_real - tot_saidas_real
         dre_list.append({"Categoria CFO": "(=) EBITDA", "Previsto (R$)": f"R$ {res_prev:,.2f}", "Realizado (R$)": f"R$ {res_real:,.2f}", "Variação (R$)": f"R$ {res_real - res_prev:,.2f}"})
-        try:
-            st.dataframe(pd.DataFrame(dre_list), use_container_width=True, hide_index=True)
-        except Exception:
-            st.dataframe(pd.DataFrame(dre_list), use_container_width=True)
+        st.dataframe(pd.DataFrame(dre_list), use_container_width=True, hide_index=True)
     else: st.warning("Sincronize a API no menu lateral para visualizar o DRE.")
 
 with tabs[3]:
@@ -482,10 +481,7 @@ with tabs[3]:
         if not df_desp_loja.empty:
             st.markdown("**Despesas por categoria**")
             pivot_desp = df_desp_loja.pivot_table(index="Categoria_CFO", columns=dimensao, values="Valor", aggfunc="sum", fill_value=0)
-            try:
-                st.dataframe(pivot_desp.style.format("R$ {:,.2f}"), use_container_width=True)
-            except Exception:
-                st.dataframe(pivot_desp, use_container_width=True)
+            st.dataframe(formatar_dataframe_brl(pivot_desp), use_container_width=True)
 
         if not df_rec_loja.empty:
             st.markdown("**Resumo Operacional (Receita x Despesa)**")
@@ -493,10 +489,7 @@ with tabs[3]:
             resumo_desp = df_desp_loja.groupby(dimensao)["Valor"].sum().to_frame("Despesas") if not df_desp_loja.empty else pd.DataFrame()
             resumo = resumo_rec.join(resumo_desp, how="outer").fillna(0)
             resumo["Resultado (Receita - Despesa)"] = resumo["Receita de Vendas"] - resumo.get("Despesas", 0)
-            try:
-                st.dataframe(resumo.style.format("R$ {:,.2f}"), use_container_width=True)
-            except Exception:
-                st.dataframe(resumo, use_container_width=True)
+            st.dataframe(formatar_dataframe_brl(resumo), use_container_width=True)
 
         if df_desp_loja.empty and df_rec_loja.empty: st.info("Nenhum lançamento com loja identificada para comparar no período selecionado.")
     else: st.warning("Sincronize a API para gerar o comparativo entre as lojas.")

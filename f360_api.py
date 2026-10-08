@@ -1,6 +1,6 @@
 """
 f360_api.py - Integração com a API pública do F360.
-Inclui leitura exata do Rateio, proteção em cartões e alinhamento inteligente de Vencidos.
+Inclui leitura exata do Rateio e alinhamento nativo de Vencimentos.
 """
 import json
 import re
@@ -198,13 +198,9 @@ def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
     df["Vencimento_real"] = pd.to_datetime(df["Vencimento_real"], errors="coerce")
     df["Liquidacao_dt"] = pd.to_datetime(df["Liquidacao_dt"], errors="coerce")
 
-    # REGRA INTELIGENTE PARA VENCIDOS
-    # Se está PENDENTE e o vencimento já passou, movemos para a data de HOJE 
-    # (para que as contas atrasadas sejam cobradas no saldo atual e não fiquem perdidas no passado)
+    # FIX: Títulos PENDENTES ficam estritamente no seu dia de Vencimento
+    # Títulos REALIZADOS vão para o dia em que o banco os liquidou
     df["Vencimento_dt"] = df["Vencimento_real"]
-    mascara_pendente_atrasado = df["Status_Clean"].eq("PENDENTE") & (df["Vencimento_real"] < hoje)
-    df.loc[mascara_pendente_atrasado, "Vencimento_dt"] = hoje
-    
     mascara_realizado = df["Status_Clean"].eq("REALIZADO") & df["Liquidacao_dt"].notna()
     df.loc[mascara_realizado, "Vencimento_dt"] = df.loc[mascara_realizado, "Liquidacao_dt"]
 
@@ -287,11 +283,7 @@ def _normaliza_cartoes(registros, mapa_cnpj):
     if df.empty: return df
     for c in ("Data_Venda", "Vencimento_real", "Liquidacao_dt"): df[c] = pd.to_datetime(df[c], errors="coerce")
     
-    # Aplica a mesma regra de trazer os atrasados para hoje nos cartões
     df["Vencimento_dt"] = df["Vencimento_real"]
-    mascara_pendente_atrasado = df["Status_Clean"].eq("PENDENTE") & (df["Vencimento_real"] < hoje)
-    df.loc[mascara_pendente_atrasado, "Vencimento_dt"] = hoje
-    
     mascara_realizado = df["Status_Clean"].eq("REALIZADO") & df["Liquidacao_dt"].notna()
     df.loc[mascara_realizado, "Vencimento_dt"] = df.loc[mascara_realizado, "Liquidacao_dt"]
     
