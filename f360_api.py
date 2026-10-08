@@ -164,7 +164,7 @@ def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
     for p in parcelas:
         status = str(p.get("Status", ""))
         s_low = status.lower()
-        if p.get("Cancelada") or "cancelad" in s_low or "baixad" in s_low:
+        if p.get("Cancelada") or "cancelad" in s_low:
             continue
 
         tit = p.get("DadosDoTitulo") or {}
@@ -216,6 +216,8 @@ def _normaliza_titulos(parcelas, mapa_cnpj, tipo_padrao="DESPESA"):
             "liquidadoall",
             "liquidadoconciliado",
             "conciliado",
+            "baixado",
+            "baixadoall",
         }
 
         liquidacao_dt_raw = _data(p.get("Liquidacao"))
@@ -668,6 +670,19 @@ def buscar_parcelas_f360(jwt, d_ini, d_fim, mapa_cnpj, tipo="Despesa",
                 progresso(passo / total)
 
     df_titulos = _normaliza_titulos(list(unicas.values()), mapa_cnpj, tipo_padrao="RECEITA" if tipo == "Receita" else "DESPESA")
+    log.append(f"NORMALIZAÇÃO {tipo}: API={len(unicas)} | após normalização={len(df_titulos)}")
+    if not df_titulos.empty:
+        try:
+            resumo_datas = (
+                df_titulos.assign(_data_fluxo=df_titulos["Vencimento_dt"].dt.strftime("%d/%m"))
+                .groupby("_data_fluxo")["Valor"].sum()
+                .sort_index()
+            )
+            log.append("DATAS " + " | ".join(f"{d}=R$ {v:,.2f}" for d, v in resumo_datas.items()))
+            resumo_status = df_titulos["Status_Clean"].value_counts().to_dict()
+            log.append(f"STATUS {tipo}: {resumo_status}")
+        except Exception as e:
+            log.append(f"Diagnóstico pós-normalização: {e}")
 
     if tipo == "Receita":
         try:
