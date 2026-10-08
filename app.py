@@ -139,7 +139,7 @@ def _preparar_titulos_detalhe(df, status=None):
     if status == "REALIZADO": d = d[d["Status_Clean"].astype(str).str.upper() == "REALIZADO"]
     elif status == "PENDENTE": d = d[d["Status_Clean"].astype(str).str.upper() == "PENDENTE"]
 
-    colunas_preferidas = ["Vencimento_dt", "Empresa", "Empresa_Loja", "Cliente/Fornecedor", "Cliente", "Fornecedor", "Plano de Contas", "Categoria_CFO", "Valor", "Status_Clean", "Status", "Data_Liquidacao"]
+    colunas_preferidas = ["Vencimento_dt", "Empresa", "Empresa_Loja", "Cliente / Fornecedor", "Plano de Contas", "Categoria_CFO", "Valor", "Status_Clean", "Status", "Data_Liquidacao"]
     colunas = [c for c in colunas_preferidas if c in d.columns]
     for c in d.columns:
         if c not in colunas and any(k in str(c).lower() for k in ["titulo", "documento", "parcela", "id", "descrição", "descricao"]):
@@ -158,7 +158,7 @@ def _preparar_titulos_detalhe(df, status=None):
 
     if "Valor" in d.columns: d["Valor"] = pd.to_numeric(d["Valor"], errors="coerce").fillna(0)
 
-    rename = {"Empresa_Loja": "Loja", "Cliente/Fornecedor": "Cliente / Fornecedor", "Plano de Contas": "Plano de Contas", "Status_Clean": "Status"}
+    rename = {"Empresa_Loja": "Loja", "Status_Clean": "Status"}
     d = d.rename(columns=rename)
     d = d.loc[:, ~d.columns.duplicated(keep="first")].copy()
     
@@ -172,7 +172,15 @@ def _preparar_titulos_detalhe(df, status=None):
             contagem[nome] += 1
             nomes.append(f"{nome}_{contagem[nome]}")
     d.columns = nomes
-    return d
+    
+    # Reordenar as colunas para o Fornecedor ficar num sítio lógico (depois da Loja)
+    cols = d.columns.tolist()
+    if "Vencimento" in cols: cols.insert(0, cols.pop(cols.index("Vencimento")))
+    if "Empresa" in cols: cols.insert(1, cols.pop(cols.index("Empresa")))
+    if "Loja" in cols: cols.insert(2, cols.pop(cols.index("Loja")))
+    if "Cliente / Fornecedor" in cols: cols.insert(3, cols.pop(cols.index("Cliente / Fornecedor")))
+    
+    return d[cols]
 
 def render_movement_cards(previsto, liquidado, aberto, titulo="Lançamentos", df_detail=None, state_prefix="mov"):
     c1, c2, c3 = st.columns(3)
@@ -383,7 +391,10 @@ with tabs[0]:
         resumo_loja = pd.concat([rec_loja.rename("Entradas"), desp_loja.rename("Saídas")], axis=1).fillna(0)
         resumo_loja["Resultado"] = resumo_loja["Entradas"] - resumo_loja["Saídas"]
         resumo_loja = resumo_loja.sort_values("Resultado", ascending=False)
-        st.dataframe(formatar_dataframe_brl(resumo_loja), use_container_width=True)
+        try:
+            st.dataframe(resumo_loja.style.format("R$ {:,.2f}"), use_container_width=True)
+        except Exception:
+            st.dataframe(resumo_loja, use_container_width=True)
     else: st.info("Sincronize a API para gerar o comparativo por loja.")
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -391,7 +402,10 @@ with tabs[0]:
     if not df_of_exec.empty:
         proj = df_of_exec[["Data", "Total_Entradas", "Total_Saidas", "Saldo"]].copy()
         proj.columns = ["Data", "Entradas", "Saídas", "Saldo"]
-        st.dataframe(formatar_dataframe_brl(proj.tail(10)), use_container_width=True, hide_index=True)
+        try:
+            st.dataframe(proj.tail(10).style.format({"Entradas": "R$ {:,.2f}", "Saídas": "R$ {:,.2f}", "Saldo": "R$ {:,.2f}"}), use_container_width=True, hide_index=True)
+        except Exception:
+            st.dataframe(proj.tail(10), use_container_width=True, hide_index=True)
     else: st.info("A projeção diária utiliza os dados do export oficial do Fluxo de Caixa F360.")
 
 with tabs[1]:
@@ -464,7 +478,10 @@ with tabs[2]:
         dre_list.append({"Categoria CFO": "8. TOTAL SAÍDAS", "Previsto (R$)": f"R$ {tot_saidas_prev:,.2f}", "Realizado (R$)": f"R$ {tot_saidas_real:,.2f}", "Variação (R$)": f"R$ {tot_saidas_real - tot_saidas_prev:,.2f}"})
         res_prev, res_real = tot_rec_prev - tot_saidas_prev, tot_rec_real - tot_saidas_real
         dre_list.append({"Categoria CFO": "(=) EBITDA", "Previsto (R$)": f"R$ {res_prev:,.2f}", "Realizado (R$)": f"R$ {res_real:,.2f}", "Variação (R$)": f"R$ {res_real - res_prev:,.2f}"})
-        st.dataframe(pd.DataFrame(dre_list), use_container_width=True, hide_index=True)
+        try:
+            st.dataframe(pd.DataFrame(dre_list), use_container_width=True, hide_index=True)
+        except Exception:
+            st.dataframe(pd.DataFrame(dre_list), use_container_width=True)
     else: st.warning("Sincronize a API no menu lateral para visualizar o DRE.")
 
 with tabs[3]:
@@ -481,7 +498,10 @@ with tabs[3]:
         if not df_desp_loja.empty:
             st.markdown("**Despesas por categoria**")
             pivot_desp = df_desp_loja.pivot_table(index="Categoria_CFO", columns=dimensao, values="Valor", aggfunc="sum", fill_value=0)
-            st.dataframe(formatar_dataframe_brl(pivot_desp), use_container_width=True)
+            try:
+                st.dataframe(pivot_desp.style.format("R$ {:,.2f}"), use_container_width=True)
+            except Exception:
+                st.dataframe(pivot_desp, use_container_width=True)
 
         if not df_rec_loja.empty:
             st.markdown("**Resumo Operacional (Receita x Despesa)**")
@@ -489,7 +509,10 @@ with tabs[3]:
             resumo_desp = df_desp_loja.groupby(dimensao)["Valor"].sum().to_frame("Despesas") if not df_desp_loja.empty else pd.DataFrame()
             resumo = resumo_rec.join(resumo_desp, how="outer").fillna(0)
             resumo["Resultado (Receita - Despesa)"] = resumo["Receita de Vendas"] - resumo.get("Despesas", 0)
-            st.dataframe(formatar_dataframe_brl(resumo), use_container_width=True)
+            try:
+                st.dataframe(resumo.style.format("R$ {:,.2f}"), use_container_width=True)
+            except Exception:
+                st.dataframe(resumo, use_container_width=True)
 
         if df_desp_loja.empty and df_rec_loja.empty: st.info("Nenhum lançamento com loja identificada para comparar no período selecionado.")
     else: st.warning("Sincronize a API para gerar o comparativo entre as lojas.")
