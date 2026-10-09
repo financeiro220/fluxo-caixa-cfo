@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import altair as alt
 from datetime import datetime, date, timedelta
 
 # IMPORTAÇÃO DO MÓDULO F360
@@ -392,7 +393,18 @@ with tabs[0]:
         if not df_desp_kpi.empty:
             comp = df_desp_kpi.groupby("Categoria_CFO")["Valor"].sum().sort_values(ascending=True)
             comp.index = [str(x).replace("1. ", "").replace("2. ", "").replace("3. ", "").replace("4. ", "").replace("5. ", "").replace("6. ", "").replace("7. ", "") for x in comp.index]
-            st.bar_chart(comp, height=280)
+            
+            # NOVO GRÁFICO ALTAIR DE BARRAS HORIZONTAIS
+            comp_df = comp.reset_index()
+            comp_df.columns = ["Categoria", "Valor"]
+            
+            grafico = alt.Chart(comp_df).mark_bar(color="#69B7FF", cornerRadiusEnd=3).encode(
+                x=alt.X("Valor:Q", title="", axis=alt.Axis(format="s", grid=False)),
+                y=alt.Y("Categoria:N", sort="-x", title="", axis=alt.Axis(labelAngle=0, labelLimit=300)),
+                tooltip=[alt.Tooltip("Categoria:N", title="Categoria"), alt.Tooltip("Valor:Q", title="R$", format=",.2f")]
+            ).properties(height=280)
+            
+            st.altair_chart(grafico, use_container_width=True)
         else: st.info("Sincronize a API para visualizar a composição das despesas.")
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -459,7 +471,10 @@ with tabs[1]:
             if isinstance(val, (int, float)): return f"R$ {val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
             return val
             
-        st.dataframe(df_display.style.apply(highlight_saldo, axis=1).format({d: format_currency for d in dias_of}), use_container_width=True, hide_index=True)
+        try:
+            st.dataframe(df_display.style.apply(highlight_saldo, axis=1).format({d: format_currency for d in dias_of}), use_container_width=True, hide_index=True)
+        except Exception:
+            st.dataframe(df_display, use_container_width=True, hide_index=True)
 
 with tabs[2]:
     st.subheader("DRE de Caixa — Visão Gerencial por Plano de Contas")
