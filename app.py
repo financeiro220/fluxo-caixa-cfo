@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import altair as alt
+import os
+import pickle
 from datetime import datetime, date, timedelta
 
 # IMPORTAÇÃO DO MÓDULO F360
@@ -25,27 +27,23 @@ st.set_page_config(
 )
 
 # ============================================================
-# IDENTIDADE VISUAL — DASHBOARD EXECUTIVO
+# IDENTIDADE VISUAL E CONSTANTES
 # ============================================================
+CACHE_API_FILE = "dados_salvos_api.pkl"
+CACHE_EXCEL_FILE = "dados_salvos_excel.pkl"
+
 st.markdown("""
 <style>
-    /* ---------- BASE ---------- */
     .stApp { background: #0B0F14; color: #F4F7FA; }
     [data-testid="stHeader"] { background: rgba(11,15,20,0.96); }
     [data-testid="stSidebar"] { background: #151A21; border-right: 1px solid #252C35; }
     [data-testid="stSidebar"] > div:first-child { padding-top: 1rem; }
-
-    /* ---------- TIPOGRAFIA ---------- */
     .hero-title { font-size: 30px; line-height: 1.05; font-weight: 800; letter-spacing: -0.8px; margin-bottom: 2px; color: #F8FAFC; }
     .hero-subtitle { color: #8F9AA8; font-size: 14px; margin-bottom: 18px; }
     .section-title { font-size: 18px; font-weight: 750; color: #F4F7FA; margin: 4px 0 10px 0; }
     .muted { color: #8994A3; font-size: 12px; }
-
-    /* ---------- STATUS ---------- */
     .status-pill { display: inline-flex; align-items: center; gap: 7px; padding: 7px 12px; border-radius: 999px; background: #123022; color: #58D68D; border: 1px solid #20583C; font-size: 12px; font-weight: 700; }
     .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #35D07F; display: inline-block; box-shadow: 0 0 10px rgba(53,208,127,.45); }
-
-    /* ---------- CARDS ---------- */
     .kpi-card { background: linear-gradient(145deg, #151B23 0%, #10151C 100%); border: 1px solid #28313C; border-radius: 12px; padding: 15px 16px 14px 16px; min-height: 112px; box-shadow: 0 8px 24px rgba(0,0,0,.12); }
     .kpi-label { color: #8F9AA8; font-size: 11px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase; margin-bottom: 7px; }
     .kpi-value { color: #F8FAFC; font-size: 24px; line-height: 1.05; font-weight: 800; letter-spacing: -.5px; }
@@ -54,25 +52,15 @@ st.markdown("""
     .kpi-yellow { color: #F4C95D; }
     .kpi-blue { color: #69B7FF; }
     .kpi-foot { color: #697585; font-size: 11px; margin-top: 8px; }
-
-    /* ---------- EXECUTIVE PANELS ---------- */
     .panel { background: #11161D; border: 1px solid #252D37; border-radius: 12px; padding: 16px; margin-bottom: 14px; }
     .panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
     .panel-title { font-size: 15px; font-weight: 750; color: #F4F7FA; }
-
-    /* ---------- ALERTS ---------- */
     .alert-good { background: #10271D; border: 1px solid #24553C; color: #67E39A; border-radius: 10px; padding: 11px 13px; font-size: 13px; font-weight: 650; }
     .alert-warn { background: #2A2413; border: 1px solid #67531D; color: #F3D36A; border-radius: 10px; padding: 11px 13px; font-size: 13px; font-weight: 650; }
     .alert-danger { background: #2A1719; border: 1px solid #663034; color: #FF8585; border-radius: 10px; padding: 11px 13px; font-size: 13px; font-weight: 650; }
-
-    /* ---------- TABLES ---------- */
     [data-testid="stDataFrame"] { border-radius: 10px; overflow: hidden; }
-
-    /* ---------- BUTTONS ---------- */
     .stButton > button { border-radius: 8px; border: 1px solid #343D49; background: #171D25; color: #E9EEF3; font-weight: 650; }
     .stButton > button:hover { border-color: #00875A; color: #5CE39A; }
-
-    /* ---------- DIVIDER ---------- */
     hr { border-color: #252D37 !important; }
 </style>
 """, unsafe_allow_html=True)
@@ -89,8 +77,35 @@ MAPA_CNPJ_LOJA = {
 }
 
 # ============================================================
-# FUNÇÕES DE CATEGORIZAÇÃO RESTAURADAS
+# FUNÇÕES E SISTEMA DE MEMÓRIA LOCAL
 # ============================================================
+if 'fluxo_oficial_cache' not in st.session_state:
+    st.session_state.fluxo_oficial_cache = {}
+    # Tenta carregar o Excel do disco
+    if os.path.exists(CACHE_EXCEL_FILE):
+        try:
+            with open(CACHE_EXCEL_FILE, 'rb') as f:
+                st.session_state.fluxo_oficial_cache = pickle.load(f)
+        except Exception:
+            pass
+
+if 'api_loaded' not in st.session_state:
+    st.session_state.api_loaded = True
+    # Tenta carregar a API do disco
+    if os.path.exists(CACHE_API_FILE):
+        try:
+            with open(CACHE_API_FILE, 'rb') as f:
+                api_data = pickle.load(f)
+            st.session_state.df_api_desp = api_data.get('desp', pd.DataFrame())
+            st.session_state.df_api_rec = api_data.get('rec', pd.DataFrame())
+            st.session_state.log_api_desp = api_data.get('log_desp', [])
+            st.session_state.log_api_rec = api_data.get('log_rec', [])
+            st.session_state.log_api_periodo = api_data.get('periodo', None)
+        except Exception:
+            pass
+
+if 'show_kpi_data' not in st.session_state: st.session_state.show_kpi_data = None
+
 def categorizar_plano_contas(plano):
     p = str(plano).upper().strip()
     if any(k in p for k in ['MÚTUO', 'MUTUO', 'INTERCOMPANY']): return "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"
@@ -107,16 +122,11 @@ def categorizar_receita(row):
     if any(k in p for k in ['MÚTUO', 'MUTUO', 'INTERCOMPANY']): return "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"
     return "0. RECEITAS DE VENDAS"
 
-# ============================================================
-# CARREGAMENTO DO EXCEL E DADOS
-# ============================================================
 @st.cache_data(ttl=3600)
 def carregar_fluxo_oficial(_arquivos):
     resultado = {}
     for arq in _arquivos:
         df_dias, saldo_ini, contas = processar_fluxo_de_caixa_oficial(arq)
-        
-        # Proteção contra múltiplos ficheiros sobrescrevendo a visão global
         nome = getattr(arq, "name", "Arquivo")
         chave = contas[0] if len(contas) == 1 else "Ver Todas as Contas"
         
@@ -139,7 +149,6 @@ def brl(v):
     return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 def formatar_dataframe_brl(df):
-    """Formata colunas numéricas de um dataframe para string BRL para exibição garantida"""
     if df is None or df.empty: return df
     df_show = df.copy()
     for col in df_show.columns:
@@ -153,7 +162,6 @@ def _preparar_titulos_detalhe(df, status=None):
     if status == "REALIZADO": d = d[d["Status_Clean"].astype(str).str.upper() == "REALIZADO"]
     elif status == "PENDENTE": d = d[d["Status_Clean"].astype(str).str.upper() == "PENDENTE"]
 
-    # INCLUI COLUNA DO CLIENTE/FORNECEDOR
     colunas_preferidas = ["Vencimento_dt", "Empresa", "Empresa_Loja", "Cliente / Fornecedor", "Plano de Contas", "Categoria_CFO", "Valor", "Status_Clean", "Status", "Data_Liquidacao"]
     colunas = [c for c in colunas_preferidas if c in d.columns]
     for c in d.columns:
@@ -188,7 +196,6 @@ def _preparar_titulos_detalhe(df, status=None):
             nomes.append(f"{nome}_{contagem[nome]}")
     d.columns = nomes
     
-    # ORDENA AS COLUNAS
     cols = d.columns.tolist()
     if "Vencimento" in cols: cols.insert(0, cols.pop(cols.index("Vencimento")))
     if "Empresa" in cols: cols.insert(1, cols.pop(cols.index("Empresa")))
@@ -245,11 +252,8 @@ def render_movement_cards(previsto, liquidado, aberto, titulo="Lançamentos", df
         st.markdown("</div>", unsafe_allow_html=True)
 
 # ============================================================
-# ESTADO E SIDEBAR
+# SIDEBAR E PROCESSAMENTO
 # ============================================================
-if 'fluxo_oficial_cache' not in st.session_state: st.session_state.fluxo_oficial_cache = {}
-if 'show_kpi_data' not in st.session_state: st.session_state.show_kpi_data = None
-
 with st.sidebar:
     st.markdown("## 🍦 BORELLI")
     st.caption("Controladoria · Fluxo de Caixa")
@@ -265,19 +269,7 @@ with st.sidebar:
 
             log_desp, log_rec = [], []
             df_desp = buscar_parcelas_f360(st.session_state.jwt, d_ini, d_fim, MAPA_CNPJ_LOJA, "Despesa", log=log_desp)
-            if not df_desp.empty:
-                # Função isolada para categorizar
-                def cat_desp(p):
-                    p = str(p).upper().strip()
-                    if any(k in p for k in ['MÚTUO', 'MUTUO', 'INTERCOMPANY']): return "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"
-                    if any(k in p for k in ['SÓCIO', 'SOCIO', 'LUCRO', 'DISTRIBUIÇÃO', 'DIVIDENDO', 'PRÓ-LABORE']): return "7. DESPESAS DE SÓCIOS"
-                    if any(k in p for k in ['CMV', 'DESCARTÁVEIS', 'LEITE', 'INSUMOS', 'BOBINAS', 'FRUTAS']): return "1. FORNECEDORES / MERCADORIAS (CMV)"
-                    if any(k in p for k in ['ICMS', 'IMPOSTO', 'FISCAL', 'DAS', 'TAXAS MUNICIPAIS', 'PIS', 'COFINS']): return "2. IMPOSTOS SOBRE VENDAS"
-                    if any(k in p for k in ['ALUGUEL', 'CONDOMÍNIO', 'ENERGIA', 'ÁGUA', 'IPTU', 'LIMPEZA']): return "3. DESPESAS DE OCUPAÇÃO"
-                    if any(k in p for k in ['SALÁRIO', 'VALE', 'FOLHA', 'FGTS', 'FÉRIAS', 'RESCISÃO', 'FUNCIONÁRIOS']): return "4. FOLHA DE PAGAMENTO & ENCARGOS"
-                    if any(k in p for k in ['EMPRÉSTIMO', 'CAPITAL DE GIRO', 'JUROS', 'MULTA', 'TARIFAS']): return "6. AMORTIZAÇÃO DE DÍVIDAS & CAPITAL"
-                    return "5. DESPESAS OPERACIONAIS & VENDAS"
-                df_desp["Categoria_CFO"] = df_desp["Plano de Contas"].apply(cat_desp)
+            if not df_desp.empty: df_desp["Categoria_CFO"] = df_desp["Plano de Contas"].apply(categorizar_plano_contas)
             st.session_state.df_api_desp, st.session_state.log_api_desp = df_desp, log_desp
 
             df_rec = buscar_parcelas_f360(st.session_state.jwt, d_ini, d_fim, MAPA_CNPJ_LOJA, "Receita", log=log_rec)
@@ -286,6 +278,15 @@ with st.sidebar:
                 df_rec["Tipo_Movimento"] = "RECEITA"
             st.session_state.df_api_rec, st.session_state.log_api_rec = df_rec, log_rec
             st.session_state.log_api_periodo = (d_ini, d_fim)
+            
+            # GUARDA API NA MEMÓRIA LOCAL
+            with open(CACHE_API_FILE, 'wb') as f:
+                pickle.dump({
+                    'desp': df_desp, 'rec': df_rec,
+                    'log_desp': log_desp, 'log_rec': log_rec,
+                    'periodo': (d_ini, d_fim)
+                }, f)
+                
             st.success(f"🟢 API sincronizada! Despesas: {len(df_desp):,} | Receitas: {len(df_rec):,}")
 
     with st.expander("🔎 LOG / DIAGNÓSTICO DA API F360", expanded=False):
@@ -301,21 +302,33 @@ with st.sidebar:
     st.markdown("### 🏦 Dados oficiais do caixa")
     file_fluxo_oficial = st.file_uploader("F360 > Fluxo de Caixa > Exportar", type=["xlsx"], accept_multiple_files=True)
     file_tabela_csv = st.file_uploader("CSV Automático (opcional)", type=["csv"], key="tabela_csv") if HAS_DOM_PROCESSOR else None
+    
     st.divider()
-    st.caption("🔐 A fonte oficial do saldo bancário continua sendo o export do Fluxo de Caixa do F360.")
+    if st.button("🧹 Limpar Memória", use_container_width=True):
+        if os.path.exists(CACHE_API_FILE): os.remove(CACHE_API_FILE)
+        if os.path.exists(CACHE_EXCEL_FILE): os.remove(CACHE_EXCEL_FILE)
+        st.session_state.clear()
+        st.rerun()
 
-# ============================================================
-# CARREGA ARQUIVOS E CABEÇALHO
-# ============================================================
-if file_fluxo_oficial: st.session_state.fluxo_oficial_cache.update(carregar_fluxo_oficial(file_fluxo_oficial))
+    st.caption("🔐 A fonte oficial do saldo bancário continua sendo o export do Fluxo de Caixa do F360. Os dados ficam salvos até que clique em Limpar Memória.")
+
+# CARREGAMENTO E SALVAMENTO DE ARQUIVOS NO CACHE
+if file_fluxo_oficial: 
+    st.session_state.fluxo_oficial_cache.update(carregar_fluxo_oficial(file_fluxo_oficial))
+    with open(CACHE_EXCEL_FILE, 'wb') as f: pickle.dump(st.session_state.fluxo_oficial_cache, f)
+
 if file_tabela_csv is not None and HAS_DOM_PROCESSOR:
     df_dom, saldo_ini_dom = processar_tabela_fluxo_dom(file_tabela_csv)
     st.session_state.fluxo_oficial_cache["CSV (via navegador)"] = {"df": df_dom, "saldo_inicial": saldo_ini_dom, "contas": []}
+    with open(CACHE_EXCEL_FILE, 'wb') as f: pickle.dump(st.session_state.fluxo_oficial_cache, f)
 
 fluxo_oficial = st.session_state.fluxo_oficial_cache
 _lista_dfs = [d for d in [st.session_state.get("df_api_desp"), st.session_state.get("df_api_rec")] if d is not None and not d.empty]
 df_api = pd.concat(_lista_dfs, ignore_index=True) if _lista_dfs else pd.DataFrame()
 
+# ============================================================
+# CABEÇALHO E FILTROS
+# ============================================================
 st.markdown("""
 <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:20px;">
     <div><div class="hero-title">🍦 BORELLI</div><div class="hero-subtitle">Fluxo de Caixa · Controladoria</div></div>
