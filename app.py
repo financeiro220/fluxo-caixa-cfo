@@ -265,7 +265,19 @@ with st.sidebar:
 
             log_desp, log_rec = [], []
             df_desp = buscar_parcelas_f360(st.session_state.jwt, d_ini, d_fim, MAPA_CNPJ_LOJA, "Despesa", log=log_desp)
-            if not df_desp.empty: df_desp["Categoria_CFO"] = df_desp["Plano de Contas"].apply(categorizar_plano_contas)
+            if not df_desp.empty:
+                # Função isolada para categorizar
+                def cat_desp(p):
+                    p = str(p).upper().strip()
+                    if any(k in p for k in ['MÚTUO', 'MUTUO', 'INTERCOMPANY']): return "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"
+                    if any(k in p for k in ['SÓCIO', 'SOCIO', 'LUCRO', 'DISTRIBUIÇÃO', 'DIVIDENDO', 'PRÓ-LABORE']): return "7. DESPESAS DE SÓCIOS"
+                    if any(k in p for k in ['CMV', 'DESCARTÁVEIS', 'LEITE', 'INSUMOS', 'BOBINAS', 'FRUTAS']): return "1. FORNECEDORES / MERCADORIAS (CMV)"
+                    if any(k in p for k in ['ICMS', 'IMPOSTO', 'FISCAL', 'DAS', 'TAXAS MUNICIPAIS', 'PIS', 'COFINS']): return "2. IMPOSTOS SOBRE VENDAS"
+                    if any(k in p for k in ['ALUGUEL', 'CONDOMÍNIO', 'ENERGIA', 'ÁGUA', 'IPTU', 'LIMPEZA']): return "3. DESPESAS DE OCUPAÇÃO"
+                    if any(k in p for k in ['SALÁRIO', 'VALE', 'FOLHA', 'FGTS', 'FÉRIAS', 'RESCISÃO', 'FUNCIONÁRIOS']): return "4. FOLHA DE PAGAMENTO & ENCARGOS"
+                    if any(k in p for k in ['EMPRÉSTIMO', 'CAPITAL DE GIRO', 'JUROS', 'MULTA', 'TARIFAS']): return "6. AMORTIZAÇÃO DE DÍVIDAS & CAPITAL"
+                    return "5. DESPESAS OPERACIONAIS & VENDAS"
+                df_desp["Categoria_CFO"] = df_desp["Plano de Contas"].apply(cat_desp)
             st.session_state.df_api_desp, st.session_state.log_api_desp = df_desp, log_desp
 
             df_rec = buscar_parcelas_f360(st.session_state.jwt, d_ini, d_fim, MAPA_CNPJ_LOJA, "Receita", log=log_rec)
@@ -394,7 +406,6 @@ with tabs[0]:
             comp = df_desp_kpi.groupby("Categoria_CFO")["Valor"].sum().sort_values(ascending=True)
             comp.index = [str(x).replace("1. ", "").replace("2. ", "").replace("3. ", "").replace("4. ", "").replace("5. ", "").replace("6. ", "").replace("7. ", "") for x in comp.index]
             
-            # NOVO GRÁFICO ALTAIR DE BARRAS HORIZONTAIS
             comp_df = comp.reset_index()
             comp_df.columns = ["Categoria", "Valor"]
             
@@ -435,7 +446,6 @@ with tabs[0]:
     else: st.info("A projeção diária utiliza os dados do export oficial do Fluxo de Caixa F360.")
 
 with tabs[1]:
-    st.subheader("Matriz Diária — Valores 100% Espelhados do F360")
     if oficial:
         df_cards = oficial["df"].copy()
         if isinstance(date_range, tuple) and len(date_range) == 2: df_cards = df_cards[(df_cards["Data"].dt.date >= date_range[0]) & (df_cards["Data"].dt.date <= date_range[1])]
