@@ -130,10 +130,8 @@ def carregar_fluxo_oficial(_arquivos):
         df_dias, saldo_ini, contas = processar_fluxo_de_caixa_oficial(arq)
         nome = getattr(arq, "name", "Arquivo")
         chave = contas[0] if len(contas) == 1 else "Ver Todas as Contas"
-        
         if chave in resultado and chave == "Ver Todas as Contas":
             st.toast(f"⚠️ Aviso: O ficheiro '{nome}' substituiu a tabela do ficheiro anterior porque partilham o mesmo nível de visualização.")
-            
         resultado[chave] = {"df": df_dias, "saldo_inicial": saldo_ini, "contas": contas}
     return resultado
 
@@ -272,6 +270,9 @@ with st.sidebar:
             df_desp = buscar_parcelas_f360(st.session_state.jwt, d_ini, d_fim, MAPA_CNPJ_LOJA, "Despesa", log=log_desp)
             
             if not df_desp.empty: 
+                # PROTEÇÃO 1: Garante que é número e inverte descontos da folha para não somarem
+                df_desp['Valor'] = pd.to_numeric(df_desp['Valor'], errors='coerce').fillna(0)
+                
                 def corrigir_descontos(row):
                     val = row['Valor']
                     plano = str(row.get('Plano de Contas', '')).upper()
@@ -381,15 +382,6 @@ if not df_kpi.empty:
     if conta_selecionada not in ("Ver Todas as Contas", "CSV (via navegador)"): df_kpi = df_kpi[df_kpi['Empresa'] == conta_selecionada]
     if isinstance(date_range, tuple) and len(date_range) == 2: df_kpi = df_kpi[(df_kpi['Vencimento_dt'].dt.date >= date_range[0]) & (df_kpi['Vencimento_dt'].dt.date <= date_range[1])]
 
-df_rec_kpi = df_kpi[(df_kpi['Tipo_Movimento'] == 'RECEITA') & (df_kpi['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")] if not df_kpi.empty else pd.DataFrame()
-df_desp_kpi = df_kpi[(df_kpi['Tipo_Movimento'] == 'DESPESA') & (df_kpi['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")] if not df_kpi.empty else pd.DataFrame()
-
-tot_rec_prev = df_rec_kpi['Valor'].sum() if not df_rec_kpi.empty else 0.0
-tot_rec_real = df_rec_kpi[df_rec_kpi['Status_Clean'] == 'REALIZADO']['Valor'].sum() if not df_rec_kpi.empty else 0.0
-tot_prev = df_desp_kpi['Valor'].sum() if not df_desp_kpi.empty else 0.0
-tot_real = df_desp_kpi[df_desp_kpi['Status_Clean'] == 'REALIZADO']['Valor'].sum() if not df_desp_kpi.empty else 0.0
-tot_pend = df_desp_kpi[df_desp_kpi['Status_Clean'] == 'PENDENTE']['Valor'].sum() if not df_desp_kpi.empty else 0.0
-
 oficial = fluxo_oficial.get(conta_selecionada) or fluxo_oficial.get("Ver Todas as Contas") or fluxo_oficial.get("CSV (via navegador)")
 if not oficial and len(fluxo_oficial) == 1: oficial = list(fluxo_oficial.values())[0]
 
@@ -401,6 +393,43 @@ if oficial:
         entradas_oficiais = df_of_exec["Total_Entradas"].sum()
         saidas_oficiais = df_of_exec["Total_Saidas"].sum()
         saldo_final_exec = df_of_exec.iloc[-1]["Saldo"]
+        
+        # --- PROTEÇÃO 2: MOTOR DE CONCILIAÇÃO AUTOMÁTICA (TAXAS DE CARTÃO vs EXCEL) ---
+        if not df_kpi.empty:
+            despesas_api_temp = df_kpi[(df_kpi['Tipo_Movimento'] == 'DESPESA') & (df_kpi['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")]
+            ajustes = []
+            for d in df_of_exec["Data"].dropna().unique():
+                d_date = pd.to_datetime(d).date()
+                saida_excel = df_of_exec[df_of_exec["Data"].dt.date == d_date]["Total_Saidas"].sum()
+                saida_api = despesas_api_temp[despesas_api_temp["Vencimento_dt"].dt.date == d_date]["Valor"].sum()
+                
+                diff = round(saida_excel - saida_api, 2)
+                if diff > 0.01:
+                    ajustes.append({
+                        "Vencimento_dt": pd.to_datetime(d),
+                        "Empresa": conta_selecionada,
+                        "Empresa_Loja": "Diversas" if conta_selecionada == "Ver Todas as Contas" else conta_selecionada,
+                        "Cliente / Fornecedor": "Taxas de Cartões / Adquirentes (iFood, etc)",
+                        "Plano de Contas": "Taxas de Cartão",
+                        "Categoria_CFO": "5. DESPESAS OPERACIONAIS & VENDAS",
+                        "Valor": diff,
+                        "Status_Clean": "REALIZADO",
+                        "Status": "Liquidado",
+                        "Tipo_Movimento": "DESPESA",
+                        "Data_Liquidacao": pd.to_datetime(d)
+                    })
+            if ajustes:
+                df_ajustes = pd.DataFrame(ajustes)
+                df_kpi = pd.concat([df_kpi, df_ajustes], ignore_index=True)
+
+df_rec_kpi = df_kpi[(df_kpi['Tipo_Movimento'] == 'RECEITA') & (df_kpi['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")] if not df_kpi.empty else pd.DataFrame()
+df_desp_kpi = df_kpi[(df_kpi['Tipo_Movimento'] == 'DESPESA') & (df_kpi['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")] if not df_kpi.empty else pd.DataFrame()
+
+tot_rec_prev = df_rec_kpi['Valor'].sum() if not df_rec_kpi.empty else 0.0
+tot_rec_real = df_rec_kpi[df_rec_kpi['Status_Clean'] == 'REALIZADO']['Valor'].sum() if not df_rec_kpi.empty else 0.0
+tot_prev = df_desp_kpi['Valor'].sum() if not df_desp_kpi.empty else 0.0
+tot_real = df_desp_kpi[df_desp_kpi['Status_Clean'] == 'REALIZADO']['Valor'].sum() if not df_desp_kpi.empty else 0.0
+tot_pend = df_desp_kpi[df_desp_kpi['Status_Clean'] == 'PENDENTE']['Valor'].sum() if not df_desp_kpi.empty else 0.0
 
 entradas_exec = entradas_oficiais if entradas_oficiais is not None else tot_rec_prev
 saidas_exec = saidas_oficiais if saidas_oficiais is not None else tot_prev
@@ -577,7 +606,6 @@ with tabs[1]:
         if not df_api.empty:
             df_cards_api = df_kpi.copy()
             
-            # --- ADICIONADO: CARDS DE RECEITAS PARA VER OS CARTÕES (IFOOD, ETC) ---
             rec_cards = df_cards_api[(df_cards_api["Tipo_Movimento"] == "RECEITA") & (df_cards_api["Categoria_CFO"] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")]
             prev_rec = rec_cards["Valor"].sum() if not rec_cards.empty else 0.0
             liq_rec = rec_cards[rec_cards["Status_Clean"] == "REALIZADO"]["Valor"].sum() if not rec_cards.empty else 0.0
@@ -587,7 +615,6 @@ with tabs[1]:
             render_movement_cards(prev_rec, liq_rec, aberto_rec, "Receitas", df_detail=rec_cards, state_prefix="fluxo_receitas")
             st.markdown("<br>", unsafe_allow_html=True)
             
-            # --- CARDS DE DESPESAS (COMO JÁ EXISTIA) ---
             desp_cards = df_cards_api[(df_cards_api["Tipo_Movimento"] == "DESPESA") & (df_cards_api["Categoria_CFO"] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")]
             prev_cards = desp_cards["Valor"].sum() if not desp_cards.empty else 0.0
             liq_cards = desp_cards[desp_cards["Status_Clean"] == "REALIZADO"]["Valor"].sum() if not desp_cards.empty else 0.0
