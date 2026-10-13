@@ -107,7 +107,6 @@ if 'show_kpi_data' not in st.session_state: st.session_state.show_kpi_data = Non
 
 def categorizar_plano_contas(plano):
     p = str(plano).upper().strip()
-    
     if any(k in p for k in ['MÚTUO', 'MUTUO', 'INTERCOMPANY', 'APLICAÇÃO']): return "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"
     if any(k in p for k in ['SÓCIO', 'SOCIO', 'LUCRO', 'DISTRIBUIÇÃO', 'DIVIDENDO', 'PRÓ-LABORE', 'PRO-LABORE']): return "7. DESPESAS DE SÓCIOS"
     if any(k in p for k in ['SALÁRIO', 'VALE', 'FOLHA', 'FGTS', 'FÉRIAS', 'RESCISÃO', 'FUNCIONÁRIOS', 'FREELANCE', 'DIARISTA', 'MÉDICO', 'INSS', 'SINDICATO', 'VT', 'VR']): return "4. FOLHA DE PAGAMENTO & ENCARGOS"
@@ -386,6 +385,7 @@ oficial = fluxo_oficial.get(conta_selecionada) or fluxo_oficial.get("Ver Todas a
 if not oficial and len(fluxo_oficial) == 1: oficial = list(fluxo_oficial.values())[0]
 
 df_of_exec, saldo_final_exec, entradas_oficiais, saidas_oficiais = pd.DataFrame(), None, None, None
+
 if oficial:
     df_of_exec = oficial["df"].copy()
     if isinstance(date_range, tuple) and len(date_range) == 2: df_of_exec = df_of_exec[(df_of_exec["Data"].dt.date >= date_range[0]) & (df_of_exec["Data"].dt.date <= date_range[1])]
@@ -422,6 +422,7 @@ if oficial:
                 df_ajustes = pd.DataFrame(ajustes)
                 df_kpi = pd.concat([df_kpi, df_ajustes], ignore_index=True)
 
+# Recalcula Variáveis após o Motor de Conciliação Injetar as Taxas
 df_rec_kpi = df_kpi[(df_kpi['Tipo_Movimento'] == 'RECEITA') & (df_kpi['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")] if not df_kpi.empty else pd.DataFrame()
 df_desp_kpi = df_kpi[(df_kpi['Tipo_Movimento'] == 'DESPESA') & (df_kpi['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")] if not df_kpi.empty else pd.DataFrame()
 
@@ -431,8 +432,28 @@ tot_prev = df_desp_kpi['Valor'].sum() if not df_desp_kpi.empty else 0.0
 tot_real = df_desp_kpi[df_desp_kpi['Status_Clean'] == 'REALIZADO']['Valor'].sum() if not df_desp_kpi.empty else 0.0
 tot_pend = df_desp_kpi[df_desp_kpi['Status_Clean'] == 'PENDENTE']['Valor'].sum() if not df_desp_kpi.empty else 0.0
 
-entradas_exec = entradas_oficiais if entradas_oficiais is not None else tot_rec_prev
-saidas_exec = saidas_oficiais if saidas_oficiais is not None else tot_prev
+# --- PROTEÇÃO 3: SINCRONIZAR EXCEL COM A API ---
+if not df_of_exec.empty and not df_kpi.empty:
+    for d in df_of_exec["Data"].dropna().unique():
+        d_date = pd.to_datetime(d).date()
+        api_desp = df_desp_kpi[df_desp_kpi["Vencimento_dt"].dt.date == d_date]["Valor"].sum()
+        api_rec = df_rec_kpi[df_rec_kpi["Vencimento_dt"].dt.date == d_date]["Valor"].sum()
+        
+        idx = df_of_exec.index[df_of_exec["Data"].dt.date == d_date]
+        if not idx.empty:
+            # Se a API tiver MAIS despesas (ex: os 950 reais adicionados), o Excel e o Gráfico atualizam-se
+            if api_desp > df_of_exec.loc[idx[0], "Total_Saidas"]:
+                df_of_exec.loc[idx[0], "Total_Saidas"] = api_desp
+            if api_rec > df_of_exec.loc[idx[0], "Total_Entradas"]:
+                df_of_exec.loc[idx[0], "Total_Entradas"] = api_rec
+    
+    # Atualiza as variáveis oficiais
+    entradas_oficiais = df_of_exec["Total_Entradas"].sum()
+    saidas_oficiais = df_of_exec["Total_Saidas"].sum()
+
+# Garante que usamos sempre o valor mais alto e atualizado (Excel atualizado vs API)
+entradas_exec = max((entradas_oficiais or 0), tot_rec_prev)
+saidas_exec = max((saidas_oficiais or 0), tot_prev)
 resultado_exec = entradas_exec - saidas_exec
 
 # ============================================================
