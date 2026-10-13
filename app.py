@@ -269,21 +269,15 @@ with st.sidebar:
             d_ini, d_fim = periodo_api[0], periodo_api[1]
 
             log_desp, log_rec = [], []
-            
-            # --- BUSCA DESPESAS COM FIX DOS DESCONTOS DO F360 ---
-            # Para corrigir o problema do Rateio, precisamos injetar a regra na listagem de titulos
-            # Como usamos a buscar_parcelas_f360 do modulo, a forma mais segura e modificar o dataframe final:
             df_desp = buscar_parcelas_f360(st.session_state.jwt, d_ini, d_fim, MAPA_CNPJ_LOJA, "Despesa", log=log_desp)
             
             if not df_desp.empty: 
-                # FIX: Inverte valor se o Plano de Contas for um Desconto e a API mandou positivo
                 def corrigir_descontos(row):
                     val = row['Valor']
                     plano = str(row.get('Plano de Contas', '')).upper()
                     if "DESCONTO" in plano and val > 0:
                         return -val
                     return val
-                
                 df_desp['Valor'] = df_desp.apply(corrigir_descontos, axis=1)
                 
                 def cat_desp(p):
@@ -449,7 +443,6 @@ with tabs[0]:
                 
             df_melt['Rotulo'] = df_melt['Valor'].apply(formata_k)
             
-            # Margem superior para o gráfico respirar
             max_y = df_melt['Valor'].max()
             max_y = max_y * 1.15 if pd.notna(max_y) and max_y > 0 else 100
             
@@ -494,7 +487,6 @@ with tabs[0]:
                 
             comp_df['Rotulo'] = comp_df['Valor'].apply(formata_k_comp)
             
-            # Margem à direita
             max_x = comp_df['Valor'].max()
             max_x = max_x * 1.2 if pd.notna(max_x) and max_x > 0 else 100
             
@@ -584,16 +576,31 @@ with tabs[1]:
 
         if not df_api.empty:
             df_cards_api = df_kpi.copy()
+            
+            # --- ADICIONADO: CARDS DE RECEITAS PARA VER OS CARTÕES (IFOOD, ETC) ---
+            rec_cards = df_cards_api[(df_cards_api["Tipo_Movimento"] == "RECEITA") & (df_cards_api["Categoria_CFO"] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")]
+            prev_rec = rec_cards["Valor"].sum() if not rec_cards.empty else 0.0
+            liq_rec = rec_cards[rec_cards["Status_Clean"] == "REALIZADO"]["Valor"].sum() if not rec_cards.empty else 0.0
+            aberto_rec = rec_cards[rec_cards["Status_Clean"] == "PENDENTE"]["Valor"].sum() if not rec_cards.empty else max(prev_rec - liq_rec, 0)
+            
+            st.markdown("#### Lançamentos do período")
+            render_movement_cards(prev_rec, liq_rec, aberto_rec, "Receitas", df_detail=rec_cards, state_prefix="fluxo_receitas")
+            st.markdown("<br>", unsafe_allow_html=True)
+            
+            # --- CARDS DE DESPESAS (COMO JÁ EXISTIA) ---
             desp_cards = df_cards_api[(df_cards_api["Tipo_Movimento"] == "DESPESA") & (df_cards_api["Categoria_CFO"] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")]
             prev_cards = desp_cards["Valor"].sum() if not desp_cards.empty else 0.0
             liq_cards = desp_cards[desp_cards["Status_Clean"] == "REALIZADO"]["Valor"].sum() if not desp_cards.empty else 0.0
             aberto_cards = desp_cards[desp_cards["Status_Clean"] == "PENDENTE"]["Valor"].sum() if not desp_cards.empty else max(prev_cards - liq_cards, 0)
-            st.markdown("#### Lançamentos do período")
+            
             render_movement_cards(prev_cards, liq_cards, aberto_cards, "Despesas", df_detail=desp_cards, state_prefix="fluxo_despesas")
         else:
+            entradas = df_cards["Total_Entradas"].sum() if not df_cards.empty else 0.0
             saidas = df_cards["Total_Saidas"].sum() if not df_cards.empty else 0.0
             st.markdown("#### Movimentação oficial do caixa")
-            render_movement_cards(saidas, saidas, 0.0, "Saídas", df_detail=None, state_prefix="fluxo_oficial")
+            render_movement_cards(entradas, entradas, 0.0, "Entradas", df_detail=None, state_prefix="fluxo_oficial_ent")
+            st.markdown("<br>", unsafe_allow_html=True)
+            render_movement_cards(saidas, saidas, 0.0, "Saídas", df_detail=None, state_prefix="fluxo_oficial_sai")
             st.caption("Para separar previsto, liquidado e em aberto, sincronize a API F360.")
     else: st.info("👈 Anexe o 'Fluxo de Caixa.xlsx' para habilitar os indicadores do fluxo diário.")
 
