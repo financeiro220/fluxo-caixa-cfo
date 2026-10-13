@@ -81,7 +81,6 @@ MAPA_CNPJ_LOJA = {
 # ============================================================
 if 'fluxo_oficial_cache' not in st.session_state:
     st.session_state.fluxo_oficial_cache = {}
-    # Tenta carregar o Excel do disco
     if os.path.exists(CACHE_EXCEL_FILE):
         try:
             with open(CACHE_EXCEL_FILE, 'rb') as f:
@@ -91,7 +90,6 @@ if 'fluxo_oficial_cache' not in st.session_state:
 
 if 'api_loaded' not in st.session_state:
     st.session_state.api_loaded = True
-    # Tenta carregar a API do disco
     if os.path.exists(CACHE_API_FILE):
         try:
             with open(CACHE_API_FILE, 'rb') as f:
@@ -108,13 +106,32 @@ if 'show_kpi_data' not in st.session_state: st.session_state.show_kpi_data = Non
 
 def categorizar_plano_contas(plano):
     p = str(plano).upper().strip()
-    if any(k in p for k in ['MÚTUO', 'MUTUO', 'INTERCOMPANY']): return "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"
-    if any(k in p for k in ['SÓCIO', 'SOCIO', 'LUCRO', 'DISTRIBUIÇÃO', 'DIVIDENDO', 'PRÓ-LABORE', 'PRO-LABORE']): return "7. DESPESAS DE SÓCIOS"
-    if any(k in p for k in ['CMV', 'DESCARTÁVEIS', 'LEITE', 'INSUMOS', 'BOBINAS', 'FRUTAS']): return "1. FORNECEDORES / MERCADORIAS (CMV)"
-    if any(k in p for k in ['ICMS', 'IMPOSTO', 'FISCAL', 'DAS', 'TAXAS MUNICIPAIS', 'PIS', 'COFINS']): return "2. IMPOSTOS SOBRE VENDAS"
-    if any(k in p for k in ['ALUGUEL', 'CONDOMÍNIO', 'ENERGIA', 'ÁGUA', 'IPTU', 'LIMPEZA']): return "3. DESPESAS DE OCUPAÇÃO"
-    if any(k in p for k in ['SALÁRIO', 'VALE', 'FOLHA', 'FGTS', 'FÉRIAS', 'RESCISÃO', 'FUNCIONÁRIOS']): return "4. FOLHA DE PAGAMENTO & ENCARGOS"
-    if any(k in p for k in ['EMPRÉSTIMO', 'CAPITAL DE GIRO', 'JUROS', 'MULTA', 'TARIFAS']): return "6. AMORTIZAÇÃO DE DÍVIDAS & CAPITAL"
+    
+    # 1. TRANSFERÊNCIAS E MÚTUOS
+    if any(k in p for k in ['MÚTUO', 'MUTUO', 'INTERCOMPANY', 'APLICAÇÃO']): 
+        return "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"
+    # 2. SÓCIOS E LUCROS
+    if any(k in p for k in ['SÓCIO', 'SOCIO', 'LUCRO', 'DISTRIBUIÇÃO', 'DIVIDENDO', 'PRÓ-LABORE', 'PRO-LABORE']): 
+        return "7. DESPESAS DE SÓCIOS"
+    # 3. FOLHA DE PAGAMENTO E FREELANCERS
+    if any(k in p for k in ['SALÁRIO', 'VALE', 'FOLHA', 'FGTS', 'FÉRIAS', 'RESCISÃO', 'FUNCIONÁRIOS', 'FREELANCE', 'DIARISTA', 'MÉDICO', 'INSS', 'SINDICATO', 'VT', 'VR']): 
+        return "4. FOLHA DE PAGAMENTO & ENCARGOS"
+    # 4. FORNECEDORES (CMV)
+    if any(k in p for k in ['CMV', 'DESCARTÁVEIS', 'LEITE', 'INSUMO', 'BOBINA', 'FRUTA', 'COMPRAS', 'MERCADORIA']): 
+        return "1. FORNECEDORES / MERCADORIAS (CMV)"
+    # 5. IMPOSTOS
+    if any(k in p for k in ['ICMS', 'IMPOSTO', 'FISCAL', 'DAS', 'TAXAS MUNICIPAIS', 'PIS', 'COFINS', 'ISS', 'SIMPLES']): 
+        return "2. IMPOSTOS SOBRE VENDAS"
+    # 6. DESPESAS DE OCUPAÇÃO
+    if any(k in p for k in ['ALUGUEL', 'CONDOMÍNIO', 'ENERGIA', 'ÁGUA', 'IPTU', 'LUZ', 'INTERNET', 'SEGURO PREDIAL', 'TELEFONE']): 
+        return "3. DESPESAS DE OCUPAÇÃO"
+    # 7. AMORTIZAÇÃO E TARIFAS BANCÁRIAS
+    if any(k in p for k in ['EMPRÉSTIMO', 'CAPITAL DE GIRO', 'JUROS', 'MULTA', 'TARIFA', 'TAXA', 'MAQUININHA', 'BANCÁRIA']): 
+        return "6. AMORTIZAÇÃO DE DÍVIDAS & CAPITAL"
+    # 8. OPERACIONAIS
+    if any(k in p for k in ['LIMPEZA', 'MANUTENÇÃO', 'CONTABILIDADE', 'MARKETING', 'IFOOD', 'SISTEMA', 'HONORÁRIO', 'MATERIAL']): 
+        return "5. DESPESAS OPERACIONAIS & VENDAS"
+        
     return "5. DESPESAS OPERACIONAIS & VENDAS"
 
 def categorizar_receita(row):
@@ -269,7 +286,22 @@ with st.sidebar:
 
             log_desp, log_rec = [], []
             df_desp = buscar_parcelas_f360(st.session_state.jwt, d_ini, d_fim, MAPA_CNPJ_LOJA, "Despesa", log=log_desp)
-            if not df_desp.empty: df_desp["Categoria_CFO"] = df_desp["Plano de Contas"].apply(categorizar_plano_contas)
+            
+            if not df_desp.empty: 
+                # Atualizado com o motor DRE aprimorado
+                def cat_desp(p):
+                    p = str(p).upper().strip()
+                    if any(k in p for k in ['MÚTUO', 'MUTUO', 'INTERCOMPANY', 'APLICAÇÃO']): return "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"
+                    if any(k in p for k in ['SÓCIO', 'SOCIO', 'LUCRO', 'DISTRIBUIÇÃO', 'DIVIDENDO', 'PRÓ-LABORE']): return "7. DESPESAS DE SÓCIOS"
+                    if any(k in p for k in ['SALÁRIO', 'VALE', 'FOLHA', 'FGTS', 'FÉRIAS', 'RESCISÃO', 'FUNCIONÁRIOS', 'FREELANCE', 'DIARISTA', 'MÉDICO', 'INSS', 'SINDICATO', 'VT', 'VR']): return "4. FOLHA DE PAGAMENTO & ENCARGOS"
+                    if any(k in p for k in ['CMV', 'DESCARTÁVEIS', 'LEITE', 'INSUMO', 'BOBINA', 'FRUTA', 'COMPRAS', 'MERCADORIA']): return "1. FORNECEDORES / MERCADORIAS (CMV)"
+                    if any(k in p for k in ['ICMS', 'IMPOSTO', 'FISCAL', 'DAS', 'TAXAS MUNICIPAIS', 'PIS', 'COFINS', 'ISS', 'SIMPLES']): return "2. IMPOSTOS SOBRE VENDAS"
+                    if any(k in p for k in ['ALUGUEL', 'CONDOMÍNIO', 'ENERGIA', 'ÁGUA', 'IPTU', 'LUZ', 'INTERNET', 'SEGURO PREDIAL', 'TELEFONE']): return "3. DESPESAS DE OCUPAÇÃO"
+                    if any(k in p for k in ['EMPRÉSTIMO', 'CAPITAL DE GIRO', 'JUROS', 'MULTA', 'TARIFA', 'TAXA', 'MAQUININHA', 'BANCÁRIA']): return "6. AMORTIZAÇÃO DE DÍVIDAS & CAPITAL"
+                    if any(k in p for k in ['LIMPEZA', 'MANUTENÇÃO', 'CONTABILIDADE', 'MARKETING', 'IFOOD', 'SISTEMA', 'HONORÁRIO', 'MATERIAL']): return "5. DESPESAS OPERACIONAIS & VENDAS"
+                    return "5. DESPESAS OPERACIONAIS & VENDAS"
+                    
+                df_desp["Categoria_CFO"] = df_desp["Plano de Contas"].apply(cat_desp)
             st.session_state.df_api_desp, st.session_state.log_api_desp = df_desp, log_desp
 
             df_rec = buscar_parcelas_f360(st.session_state.jwt, d_ini, d_fim, MAPA_CNPJ_LOJA, "Receita", log=log_rec)
@@ -279,7 +311,6 @@ with st.sidebar:
             st.session_state.df_api_rec, st.session_state.log_api_rec = df_rec, log_rec
             st.session_state.log_api_periodo = (d_ini, d_fim)
             
-            # GUARDA API NA MEMÓRIA LOCAL
             with open(CACHE_API_FILE, 'wb') as f:
                 pickle.dump({
                     'desp': df_desp, 'rec': df_rec,
@@ -452,11 +483,30 @@ with tabs[0]:
     if not df_of_exec.empty:
         proj = df_of_exec[["Data", "Total_Entradas", "Total_Saidas", "Saldo"]].copy()
         proj.columns = ["Data", "Entradas", "Saídas", "Saldo"]
+        
+        # 1. Remove o 00:00:00 formatando a data corretamente
+        proj['Data'] = pd.to_datetime(proj['Data']).dt.strftime('%d/%m/%Y')
+        
+        # 2. Cria uma regra de cor para o Saldo (Vermelho se negativo, Verde se positivo)
+        def colorir_saldo(val):
+            if isinstance(val, (int, float)):
+                if val < 0: return 'color: #FF6262; font-weight: bold;'
+                elif val > 0: return 'color: #45D483; font-weight: bold;'
+            return ''
+
         try:
-            st.dataframe(proj.tail(10).style.format({"Entradas": "R$ {:,.2f}", "Saídas": "R$ {:,.2f}", "Saldo": "R$ {:,.2f}"}), use_container_width=True, hide_index=True)
+            # Aplica a formatação de R$ e as cores na tabela
+            tabela_formatada = proj.tail(10).style.format({
+                "Entradas": "R$ {:,.2f}", 
+                "Saídas": "R$ {:,.2f}", 
+                "Saldo": "R$ {:,.2f}"
+            }).map(colorir_saldo, subset=['Saldo'])
+            
+            st.dataframe(tabela_formatada, use_container_width=True, hide_index=True)
         except Exception:
             st.dataframe(proj.tail(10), use_container_width=True, hide_index=True)
-    else: st.info("A projeção diária utiliza os dados do export oficial do Fluxo de Caixa F360.")
+    else: 
+        st.info("A projeção diária utiliza os dados do export oficial do Fluxo de Caixa F360.")
 
 with tabs[1]:
     if oficial:
