@@ -448,9 +448,9 @@ with tabs[0]:
             textos = base.mark_text(
                 align='center',
                 baseline='bottom',
-                dy=-4,
-                fontSize=11,
-                fontWeight=600,
+                dy=-5,
+                fontSize=13, # AUMENTADO PARA MAIOR LEITURA
+                fontWeight="bold", # EM NEGRITO (CAIXA ALTA)
                 color="#F8FAFC"
             ).encode(
                 text=alt.Text('Rotulo:N')
@@ -487,9 +487,9 @@ with tabs[0]:
             textos_comp = base_comp.mark_text(
                 align='left',
                 baseline='middle',
-                dx=4,
-                fontSize=11,
-                fontWeight=600,
+                dx=5,
+                fontSize=13, # AUMENTADO PARA MAIOR LEITURA
+                fontWeight="bold", # EM NEGRITO (CAIXA ALTA)
                 color="#F8FAFC"
             ).encode(
                 text=alt.Text('Rotulo:N')
