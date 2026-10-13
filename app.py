@@ -429,7 +429,7 @@ with tabs[0]:
             
             def formata_k(val):
                 if val < 100: return ""
-                if val >= 1000: return f"{val/1000:.1f}k".replace(".0k", "k")
+                if val >= 1000: return f"{val/1000:.1f}K".replace(".0K", "K")
                 return f"{val:.0f}"
                 
             df_melt['Rotulo'] = df_melt['Valor'].apply(formata_k)
@@ -470,7 +470,7 @@ with tabs[0]:
             
             def formata_k_comp(val):
                 if val < 10: return ""
-                if val >= 1000: return f"{val/1000:.1f}k".replace(".0k", "k")
+                if val >= 1000: return f"{val/1000:.1f}K".replace(".0K", "K")
                 return f"{val:.0f}"
                 
             comp_df['Rotulo'] = comp_df['Valor'].apply(formata_k_comp)
