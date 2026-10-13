@@ -288,7 +288,6 @@ with st.sidebar:
             df_desp = buscar_parcelas_f360(st.session_state.jwt, d_ini, d_fim, MAPA_CNPJ_LOJA, "Despesa", log=log_desp)
             
             if not df_desp.empty: 
-                # Atualizado com o motor DRE aprimorado
                 def cat_desp(p):
                     p = str(p).upper().strip()
                     if any(k in p for k in ['MÚTUO', 'MUTUO', 'INTERCOMPANY', 'APLICAÇÃO']): return "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"
@@ -439,9 +438,22 @@ with tabs[0]:
     with g1:
         st.markdown('<div class="panel"><div class="panel-header"><div class="panel-title">Fluxo de Caixa · Entradas × Saídas</div><div class="muted">por dia</div></div></div>', unsafe_allow_html=True)
         if not df_of_exec.empty:
-            chart_df = df_of_exec[["Data", "Total_Entradas", "Total_Saidas"]].set_index("Data")
-            chart_df.columns = ["Entradas", "Saídas"]
-            st.line_chart(chart_df, height=280)
+            # NOVO GRÁFICO ALTAIR DE BARRAS AGRUPADAS (FIM DAS LINHAS CRUZADAS E HORAS)
+            chart_df = df_of_exec[["Data", "Total_Entradas", "Total_Saidas"]].copy()
+            chart_df.columns = ["Data", "Entradas", "Saídas"]
+            chart_df['Data_str'] = chart_df['Data'].dt.strftime('%d/%m')
+            
+            df_melt = chart_df.melt(id_vars=['Data_str'], value_vars=['Entradas', 'Saídas'], var_name='Tipo', value_name='Valor')
+            
+            grafico_fluxo = alt.Chart(df_melt).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
+                x=alt.X("Data_str:O", title="", axis=alt.Axis(labelAngle=0)),
+                xOffset="Tipo:N",
+                y=alt.Y("Valor:Q", title="", axis=alt.Axis(format="s", grid=True)),
+                color=alt.Color("Tipo:N", scale=alt.Scale(domain=["Entradas", "Saídas"], range=["#45D483", "#FF6262"]), legend=alt.Legend(title="", orient="bottom")),
+                tooltip=[alt.Tooltip("Data_str:O", title="Data"), alt.Tooltip("Tipo:N", title="Tipo"), alt.Tooltip("Valor:Q", title="R$", format=",.2f")]
+            ).properties(height=280)
+            
+            st.altair_chart(grafico_fluxo, use_container_width=True)
         else: st.info("Anexe o export 'Fluxo de Caixa.xlsx' para visualizar o fluxo diário oficial.")
 
     with g2:
