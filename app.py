@@ -107,31 +107,14 @@ if 'show_kpi_data' not in st.session_state: st.session_state.show_kpi_data = Non
 def categorizar_plano_contas(plano):
     p = str(plano).upper().strip()
     
-    # 1. TRANSFERÊNCIAS E MÚTUOS
-    if any(k in p for k in ['MÚTUO', 'MUTUO', 'INTERCOMPANY', 'APLICAÇÃO']): 
-        return "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"
-    # 2. SÓCIOS E LUCROS
-    if any(k in p for k in ['SÓCIO', 'SOCIO', 'LUCRO', 'DISTRIBUIÇÃO', 'DIVIDENDO', 'PRÓ-LABORE', 'PRO-LABORE']): 
-        return "7. DESPESAS DE SÓCIOS"
-    # 3. FOLHA DE PAGAMENTO E FREELANCERS
-    if any(k in p for k in ['SALÁRIO', 'VALE', 'FOLHA', 'FGTS', 'FÉRIAS', 'RESCISÃO', 'FUNCIONÁRIOS', 'FREELANCE', 'DIARISTA', 'MÉDICO', 'INSS', 'SINDICATO', 'VT', 'VR']): 
-        return "4. FOLHA DE PAGAMENTO & ENCARGOS"
-    # 4. FORNECEDORES (CMV)
-    if any(k in p for k in ['CMV', 'DESCARTÁVEIS', 'LEITE', 'INSUMO', 'BOBINA', 'FRUTA', 'COMPRAS', 'MERCADORIA']): 
-        return "1. FORNECEDORES / MERCADORIAS (CMV)"
-    # 5. IMPOSTOS
-    if any(k in p for k in ['ICMS', 'IMPOSTO', 'FISCAL', 'DAS', 'TAXAS MUNICIPAIS', 'PIS', 'COFINS', 'ISS', 'SIMPLES']): 
-        return "2. IMPOSTOS SOBRE VENDAS"
-    # 6. DESPESAS DE OCUPAÇÃO
-    if any(k in p for k in ['ALUGUEL', 'CONDOMÍNIO', 'ENERGIA', 'ÁGUA', 'IPTU', 'LUZ', 'INTERNET', 'SEGURO PREDIAL', 'TELEFONE']): 
-        return "3. DESPESAS DE OCUPAÇÃO"
-    # 7. AMORTIZAÇÃO E TARIFAS BANCÁRIAS
-    if any(k in p for k in ['EMPRÉSTIMO', 'CAPITAL DE GIRO', 'JUROS', 'MULTA', 'TARIFA', 'TAXA', 'MAQUININHA', 'BANCÁRIA']): 
-        return "6. AMORTIZAÇÃO DE DÍVIDAS & CAPITAL"
-    # 8. OPERACIONAIS
-    if any(k in p for k in ['LIMPEZA', 'MANUTENÇÃO', 'CONTABILIDADE', 'MARKETING', 'IFOOD', 'SISTEMA', 'HONORÁRIO', 'MATERIAL']): 
-        return "5. DESPESAS OPERACIONAIS & VENDAS"
-        
+    if any(k in p for k in ['MÚTUO', 'MUTUO', 'INTERCOMPANY', 'APLICAÇÃO']): return "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"
+    if any(k in p for k in ['SÓCIO', 'SOCIO', 'LUCRO', 'DISTRIBUIÇÃO', 'DIVIDENDO', 'PRÓ-LABORE', 'PRO-LABORE']): return "7. DESPESAS DE SÓCIOS"
+    if any(k in p for k in ['SALÁRIO', 'VALE', 'FOLHA', 'FGTS', 'FÉRIAS', 'RESCISÃO', 'FUNCIONÁRIOS', 'FREELANCE', 'DIARISTA', 'MÉDICO', 'INSS', 'SINDICATO', 'VT', 'VR']): return "4. FOLHA DE PAGAMENTO & ENCARGOS"
+    if any(k in p for k in ['CMV', 'DESCARTÁVEIS', 'LEITE', 'INSUMO', 'BOBINA', 'FRUTA', 'COMPRAS', 'MERCADORIA']): return "1. FORNECEDORES / MERCADORIAS (CMV)"
+    if any(k in p for k in ['ICMS', 'IMPOSTO', 'FISCAL', 'DAS', 'TAXAS MUNICIPAIS', 'PIS', 'COFINS', 'ISS', 'SIMPLES']): return "2. IMPOSTOS SOBRE VENDAS"
+    if any(k in p for k in ['ALUGUEL', 'CONDOMÍNIO', 'ENERGIA', 'ÁGUA', 'IPTU', 'LUZ', 'INTERNET', 'SEGURO PREDIAL', 'TELEFONE']): return "3. DESPESAS DE OCUPAÇÃO"
+    if any(k in p for k in ['EMPRÉSTIMO', 'CAPITAL DE GIRO', 'JUROS', 'MULTA', 'TARIFA', 'TAXA', 'MAQUININHA', 'BANCÁRIA']): return "6. AMORTIZAÇÃO DE DÍVIDAS & CAPITAL"
+    if any(k in p for k in ['LIMPEZA', 'MANUTENÇÃO', 'CONTABILIDADE', 'MARKETING', 'IFOOD', 'SISTEMA', 'HONORÁRIO', 'MATERIAL']): return "5. DESPESAS OPERACIONAIS & VENDAS"
     return "5. DESPESAS OPERACIONAIS & VENDAS"
 
 def categorizar_receita(row):
@@ -438,22 +421,42 @@ with tabs[0]:
     with g1:
         st.markdown('<div class="panel"><div class="panel-header"><div class="panel-title">Fluxo de Caixa · Entradas × Saídas</div><div class="muted">por dia</div></div></div>', unsafe_allow_html=True)
         if not df_of_exec.empty:
-            # NOVO GRÁFICO ALTAIR DE BARRAS AGRUPADAS (FIM DAS LINHAS CRUZADAS E HORAS)
             chart_df = df_of_exec[["Data", "Total_Entradas", "Total_Saidas"]].copy()
             chart_df.columns = ["Data", "Entradas", "Saídas"]
             chart_df['Data_str'] = chart_df['Data'].dt.strftime('%d/%m')
             
             df_melt = chart_df.melt(id_vars=['Data_str'], value_vars=['Entradas', 'Saídas'], var_name='Tipo', value_name='Valor')
             
-            grafico_fluxo = alt.Chart(df_melt).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
+            def formata_k(val):
+                if val < 100: return ""
+                if val >= 1000: return f"{val/1000:.1f}k".replace(".0k", "k")
+                return f"{val:.0f}"
+                
+            df_melt['Rotulo'] = df_melt['Valor'].apply(formata_k)
+            
+            base = alt.Chart(df_melt).encode(
                 x=alt.X("Data_str:O", title="", axis=alt.Axis(labelAngle=0)),
                 xOffset="Tipo:N",
-                y=alt.Y("Valor:Q", title="", axis=alt.Axis(format="s", grid=True)),
+                y=alt.Y("Valor:Q", title="", axis=alt.Axis(format="s", grid=True))
+            )
+            
+            barras = base.mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
                 color=alt.Color("Tipo:N", scale=alt.Scale(domain=["Entradas", "Saídas"], range=["#45D483", "#FF6262"]), legend=alt.Legend(title="", orient="bottom")),
                 tooltip=[alt.Tooltip("Data_str:O", title="Data"), alt.Tooltip("Tipo:N", title="Tipo"), alt.Tooltip("Valor:Q", title="R$", format=",.2f")]
-            ).properties(height=280)
+            )
             
-            st.altair_chart(grafico_fluxo, use_container_width=True)
+            textos = base.mark_text(
+                align='center',
+                baseline='bottom',
+                dy=-4,
+                fontSize=11,
+                fontWeight=600,
+                color="#F8FAFC"
+            ).encode(
+                text=alt.Text('Rotulo:N')
+            )
+            
+            st.altair_chart((barras + textos).properties(height=280), use_container_width=True)
         else: st.info("Anexe o export 'Fluxo de Caixa.xlsx' para visualizar o fluxo diário oficial.")
 
     with g2:
@@ -465,13 +468,34 @@ with tabs[0]:
             comp_df = comp.reset_index()
             comp_df.columns = ["Categoria", "Valor"]
             
-            grafico = alt.Chart(comp_df).mark_bar(color="#69B7FF", cornerRadiusEnd=3).encode(
-                x=alt.X("Valor:Q", title="", axis=alt.Axis(format="s", grid=False)),
-                y=alt.Y("Categoria:N", sort="-x", title="", axis=alt.Axis(labelAngle=0, labelLimit=300)),
-                tooltip=[alt.Tooltip("Categoria:N", title="Categoria"), alt.Tooltip("Valor:Q", title="R$", format=",.2f")]
-            ).properties(height=280)
+            def formata_k_comp(val):
+                if val < 10: return ""
+                if val >= 1000: return f"{val/1000:.1f}k".replace(".0k", "k")
+                return f"{val:.0f}"
+                
+            comp_df['Rotulo'] = comp_df['Valor'].apply(formata_k_comp)
             
-            st.altair_chart(grafico, use_container_width=True)
+            base_comp = alt.Chart(comp_df).encode(
+                x=alt.X("Valor:Q", title="", axis=alt.Axis(format="s", grid=False)),
+                y=alt.Y("Categoria:N", sort="-x", title="", axis=alt.Axis(labelAngle=0, labelLimit=300))
+            )
+            
+            barras_comp = base_comp.mark_bar(color="#69B7FF", cornerRadiusEnd=3).encode(
+                tooltip=[alt.Tooltip("Categoria:N", title="Categoria"), alt.Tooltip("Valor:Q", title="R$", format=",.2f")]
+            )
+            
+            textos_comp = base_comp.mark_text(
+                align='left',
+                baseline='middle',
+                dx=4,
+                fontSize=11,
+                fontWeight=600,
+                color="#F8FAFC"
+            ).encode(
+                text=alt.Text('Rotulo:N')
+            )
+            
+            st.altair_chart((barras_comp + textos_comp).properties(height=280), use_container_width=True)
         else: st.info("Sincronize a API para visualizar a composição das despesas.")
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -496,10 +520,8 @@ with tabs[0]:
         proj = df_of_exec[["Data", "Total_Entradas", "Total_Saidas", "Saldo"]].copy()
         proj.columns = ["Data", "Entradas", "Saídas", "Saldo"]
         
-        # 1. Remove o 00:00:00 formatando a data corretamente
         proj['Data'] = pd.to_datetime(proj['Data']).dt.strftime('%d/%m/%Y')
         
-        # 2. Cria uma regra de cor para o Saldo (Vermelho se negativo, Verde se positivo)
         def colorir_saldo(val):
             if isinstance(val, (int, float)):
                 if val < 0: return 'color: #FF6262; font-weight: bold;'
@@ -507,7 +529,6 @@ with tabs[0]:
             return ''
 
         try:
-            # Aplica a formatação de R$ e as cores na tabela
             tabela_formatada = proj.tail(10).style.format({
                 "Entradas": "R$ {:,.2f}", 
                 "Saídas": "R$ {:,.2f}", 
