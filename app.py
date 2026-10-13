@@ -4,6 +4,7 @@ import numpy as np
 import altair as alt
 import os
 import pickle
+import re
 from datetime import datetime, date, timedelta
 
 # IMPORTAÇÃO DO MÓDULO F360
@@ -268,9 +269,23 @@ with st.sidebar:
             d_ini, d_fim = periodo_api[0], periodo_api[1]
 
             log_desp, log_rec = [], []
+            
+            # --- BUSCA DESPESAS COM FIX DOS DESCONTOS DO F360 ---
+            # Para corrigir o problema do Rateio, precisamos injetar a regra na listagem de titulos
+            # Como usamos a buscar_parcelas_f360 do modulo, a forma mais segura e modificar o dataframe final:
             df_desp = buscar_parcelas_f360(st.session_state.jwt, d_ini, d_fim, MAPA_CNPJ_LOJA, "Despesa", log=log_desp)
             
             if not df_desp.empty: 
+                # FIX: Inverte valor se o Plano de Contas for um Desconto e a API mandou positivo
+                def corrigir_descontos(row):
+                    val = row['Valor']
+                    plano = str(row.get('Plano de Contas', '')).upper()
+                    if "DESCONTO" in plano and val > 0:
+                        return -val
+                    return val
+                
+                df_desp['Valor'] = df_desp.apply(corrigir_descontos, axis=1)
+                
                 def cat_desp(p):
                     p = str(p).upper().strip()
                     if any(k in p for k in ['MÚTUO', 'MUTUO', 'INTERCOMPANY', 'APLICAÇÃO']): return "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"
@@ -434,10 +449,14 @@ with tabs[0]:
                 
             df_melt['Rotulo'] = df_melt['Valor'].apply(formata_k)
             
+            # Margem superior para o gráfico respirar
+            max_y = df_melt['Valor'].max()
+            max_y = max_y * 1.15 if pd.notna(max_y) and max_y > 0 else 100
+            
             base = alt.Chart(df_melt).encode(
                 x=alt.X("Data_str:O", title="", axis=alt.Axis(labelAngle=0)),
                 xOffset="Tipo:N",
-                y=alt.Y("Valor:Q", title="", axis=alt.Axis(format="s", grid=True))
+                y=alt.Y("Valor:Q", title="", scale=alt.Scale(domain=[0, max_y]), axis=alt.Axis(format="s", grid=True))
             )
             
             barras = base.mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
@@ -448,9 +467,9 @@ with tabs[0]:
             textos = base.mark_text(
                 align='center',
                 baseline='bottom',
-                dy=-5,
-                fontSize=13, # AUMENTADO PARA MAIOR LEITURA
-                fontWeight="bold", # EM NEGRITO (CAIXA ALTA)
+                dy=-8,
+                fontSize=13,
+                fontWeight="bold",
                 color="#F8FAFC"
             ).encode(
                 text=alt.Text('Rotulo:N')
@@ -475,8 +494,12 @@ with tabs[0]:
                 
             comp_df['Rotulo'] = comp_df['Valor'].apply(formata_k_comp)
             
+            # Margem à direita
+            max_x = comp_df['Valor'].max()
+            max_x = max_x * 1.2 if pd.notna(max_x) and max_x > 0 else 100
+            
             base_comp = alt.Chart(comp_df).encode(
-                x=alt.X("Valor:Q", title="", axis=alt.Axis(format="s", grid=False)),
+                x=alt.X("Valor:Q", title="", scale=alt.Scale(domain=[0, max_x]), axis=alt.Axis(format="s", grid=False)),
                 y=alt.Y("Categoria:N", sort="-x", title="", axis=alt.Axis(labelAngle=0, labelLimit=300))
             )
             
@@ -488,8 +511,8 @@ with tabs[0]:
                 align='left',
                 baseline='middle',
                 dx=5,
-                fontSize=13, # AUMENTADO PARA MAIOR LEITURA
-                fontWeight="bold", # EM NEGRITO (CAIXA ALTA)
+                fontSize=13,
+                fontWeight="bold",
                 color="#F8FAFC"
             ).encode(
                 text=alt.Text('Rotulo:N')
@@ -506,10 +529,23 @@ with tabs[0]:
         rec_loja = df_loja_exec[(df_loja_exec["Tipo_Movimento"] == "RECEITA") & (df_loja_exec["Categoria_CFO"] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")].groupby(dimensao_exec)["Valor"].sum()
         desp_loja = df_loja_exec[(df_loja_exec["Tipo_Movimento"] == "DESPESA") & (df_loja_exec["Categoria_CFO"] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")].groupby(dimensao_exec)["Valor"].sum()
         resumo_loja = pd.concat([rec_loja.rename("Entradas"), desp_loja.rename("Saídas")], axis=1).fillna(0)
-        resumo_loja["Resultado"] = resumo_loja["Entradas"] - resumo_loja["Saídas"]
-        resumo_loja = resumo_loja.sort_values("Resultado", ascending=False)
+        resumo_loja["Resultado (Receita - Despesa)"] = resumo_loja["Entradas"] - resumo_loja["Saídas"]
+        resumo_loja = resumo_loja.sort_values("Resultado (Receita - Despesa)", ascending=False)
+        
+        def formatar_tabela_loja(val):
+            if isinstance(val, (int, float)):
+                if val == 0: return "—"
+                return f"R$ {val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            return val
+            
+        def style_loja_resultado(val):
+            if isinstance(val, (int, float)):
+                if val < 0: return 'color: #FF6262; font-weight: bold;'
+                elif val > 0: return 'color: #45D483; font-weight: bold;'
+            return ''
+            
         try:
-            st.dataframe(resumo_loja.style.format("R$ {:,.2f}"), use_container_width=True)
+            st.dataframe(resumo_loja.style.format(formatar_tabela_loja).map(style_loja_resultado, subset=["Resultado (Receita - Despesa)"]), use_container_width=True)
         except Exception:
             st.dataframe(resumo_loja, use_container_width=True)
     else: st.info("Sincronize a API para gerar o comparativo por loja.")
@@ -613,8 +649,25 @@ with tabs[2]:
         dre_list.append({"Categoria CFO": "8. TOTAL SAÍDAS", "Previsto (R$)": f"R$ {tot_saidas_prev:,.2f}", "Realizado (R$)": f"R$ {tot_saidas_real:,.2f}", "Variação (R$)": f"R$ {tot_saidas_real - tot_saidas_prev:,.2f}"})
         res_prev, res_real = tot_rec_prev - tot_saidas_prev, tot_rec_real - tot_saidas_real
         dre_list.append({"Categoria CFO": "(=) EBITDA", "Previsto (R$)": f"R$ {res_prev:,.2f}", "Realizado (R$)": f"R$ {res_real:,.2f}", "Variação (R$)": f"R$ {res_real - res_prev:,.2f}"})
+        
+        def colorir_linha_dre(row):
+            styles = [''] * len(row)
+            cat = str(row.iloc[0])
+            if "(=) EBITDA" in cat:
+                for i, val in enumerate(row):
+                    if i > 0 and isinstance(val, str):
+                        try:
+                            v = float(val.replace('R$ ', '').replace('.', '').replace(',', '.'))
+                            if v < 0: styles[i] = 'color: #FF6262; font-weight: bold;'
+                            elif v > 0: styles[i] = 'color: #45D483; font-weight: bold;'
+                        except: pass
+            elif "8. TOTAL SAÍDAS" in cat:
+                styles = ['font-weight: bold; border-top: 1px solid #303A46;'] * len(row)
+            return styles
+
         try:
-            st.dataframe(pd.DataFrame(dre_list), use_container_width=True, hide_index=True)
+            df_dre_formatado = pd.DataFrame(dre_list)
+            st.dataframe(df_dre_formatado.style.apply(colorir_linha_dre, axis=1), use_container_width=True, hide_index=True)
         except Exception:
             st.dataframe(pd.DataFrame(dre_list), use_container_width=True)
     else: st.warning("Sincronize a API no menu lateral para visualizar o DRE.")
@@ -630,11 +683,17 @@ with tabs[3]:
         df_desp_loja = df_filtered_loja[(df_filtered_loja["Tipo_Movimento"] == "DESPESA") & (df_filtered_loja["Categoria_CFO"] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")]
         df_rec_loja = df_filtered_loja[(df_filtered_loja["Tipo_Movimento"] == "RECEITA") & (df_filtered_loja["Categoria_CFO"] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")]
 
+        def formatar_tabela_loja_sem_zero(val):
+            if isinstance(val, (int, float)):
+                if val == 0: return "—"
+                return f"R$ {val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            return val
+
         if not df_desp_loja.empty:
             st.markdown("**Despesas por categoria**")
             pivot_desp = df_desp_loja.pivot_table(index="Categoria_CFO", columns=dimensao, values="Valor", aggfunc="sum", fill_value=0)
             try:
-                st.dataframe(pivot_desp.style.format("R$ {:,.2f}"), use_container_width=True)
+                st.dataframe(pivot_desp.style.format(formatar_tabela_loja_sem_zero), use_container_width=True)
             except Exception:
                 st.dataframe(pivot_desp, use_container_width=True)
 
@@ -644,8 +703,15 @@ with tabs[3]:
             resumo_desp = df_desp_loja.groupby(dimensao)["Valor"].sum().to_frame("Despesas") if not df_desp_loja.empty else pd.DataFrame()
             resumo = resumo_rec.join(resumo_desp, how="outer").fillna(0)
             resumo["Resultado (Receita - Despesa)"] = resumo["Receita de Vendas"] - resumo.get("Despesas", 0)
+            
+            def style_loja_resultado(val):
+                if isinstance(val, (int, float)):
+                    if val < 0: return 'color: #FF6262; font-weight: bold;'
+                    elif val > 0: return 'color: #45D483; font-weight: bold;'
+                return ''
+                
             try:
-                st.dataframe(resumo.style.format("R$ {:,.2f}"), use_container_width=True)
+                st.dataframe(resumo.style.format(formatar_tabela_loja_sem_zero).map(style_loja_resultado, subset=["Resultado (Receita - Despesa)"]), use_container_width=True)
             except Exception:
                 st.dataframe(resumo, use_container_width=True)
 
