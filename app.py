@@ -32,19 +32,20 @@ st.set_page_config(
 # FUNÇÃO BLINDADA PARA CARREGAR A LOGO LOCAL
 # ============================================================
 def carregar_logo():
-    nome_alvo = "logo_borelli.png".lower()
-    pastas_para_tentar = ["."]
+    # Tenta lidar com extensões duplas do Windows e espaços extra
+    nomes_tentativas = ["logo_borelli.png", "logo_borelli.png.png", "logo_borelli"]
     
-    try:
-        # Tenta também a pasta exata onde este arquivo app.py está guardado
-        pastas_para_tentar.append(os.path.dirname(os.path.abspath(__file__)))
-    except NameError:
-        pass
+    pastas_para_tentar = [
+        ".", 
+        os.path.dirname(os.path.abspath(__file__)),
+        os.getcwd()
+    ]
 
     for pasta in set(pastas_para_tentar):
         try:
-            for arquivo in os.listdir(pasta):
-                if arquivo.lower() == nome_alvo:
+            arquivos_na_pasta = os.listdir(pasta)
+            for arquivo in arquivos_na_pasta:
+                if arquivo.lower().strip() in nomes_tentativas:
                     caminho_completo = os.path.join(pasta, arquivo)
                     with open(caminho_completo, "rb") as f:
                         return base64.b64encode(f.read()).decode()
@@ -54,9 +55,8 @@ def carregar_logo():
 
 LOGO_BASE64 = carregar_logo()
 
-# Avisa o usuário caso a imagem não tenha sido encontrada na pasta
 if LOGO_BASE64 is None:
-    st.toast("⚠️ A imagem 'logo_borelli.png' não foi encontrada na pasta. Verifique o nome do arquivo.", icon="⚠️")
+    st.toast("⚠️ Imagem da logo não encontrada. Verifique se o nome não tem espaços extra.", icon="⚠️")
 
 # ============================================================
 # TELA DE LOGIN (gate simples antes de mostrar qualquer dado)
@@ -82,7 +82,6 @@ if not st.session_state.autenticado:
     with col_meio:
         st.markdown("<br><br><br>", unsafe_allow_html=True)
         
-        # Renderiza a Logo no Login
         if LOGO_BASE64:
             st.markdown(
                 f"<div style='text-align:center;'><img src='data:image/png;base64,{LOGO_BASE64}' style='max-height:140px; margin-bottom:15px;'></div>"
@@ -108,7 +107,7 @@ if not st.session_state.autenticado:
             else:
                 st.error("Usuário ou senha incorretos.")
 
-    st.stop()  # não renderiza nada do painel abaixo enquanto não logar
+    st.stop()
 
 # ============================================================
 # IDENTIDADE VISUAL E CONSTANTES
@@ -336,7 +335,6 @@ def render_movement_cards(previsto, liquidado, aberto, titulo="Lançamentos", df
 # SIDEBAR E PROCESSAMENTO
 # ============================================================
 with st.sidebar:
-    # Renderiza a Logo na Sidebar
     if LOGO_BASE64:
         st.markdown(
             f"<div style='text-align:center;'><img src='data:image/png;base64,{LOGO_BASE64}' style='max-width:160px; margin-bottom:10px;'></div>",
@@ -446,7 +444,6 @@ df_api = pd.concat(_lista_dfs, ignore_index=True) if _lista_dfs else pd.DataFram
 # ============================================================
 # CABEÇALHO E FILTROS
 # ============================================================
-# Renderiza a Logo no Cabeçalho
 if LOGO_BASE64:
     header_html = f"""
     <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:20px; margin-bottom: 20px;">
