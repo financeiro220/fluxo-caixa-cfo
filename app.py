@@ -31,25 +31,32 @@ st.set_page_config(
 # ============================================================
 # FUNÇÃO BLINDADA PARA CARREGAR A LOGO LOCAL
 # ============================================================
-def carregar_logo(nome_arquivo):
+def carregar_logo():
+    nome_alvo = "logo_borelli.png".lower()
+    pastas_para_tentar = ["."]
+    
     try:
-        # Tenta primeiro procurar na exata mesma pasta do app.py
-        pasta_do_script = os.path.dirname(os.path.abspath(__file__))
-        caminho_absoluto = os.path.join(pasta_do_script, nome_arquivo)
-        
-        if os.path.exists(caminho_absoluto):
-            with open(caminho_absoluto, "rb") as f:
-                return base64.b64encode(f.read()).decode()
-                
-        # Fallback caso a primeira opção falhe
-        elif os.path.exists(nome_arquivo):
-            with open(nome_arquivo, "rb") as f:
-                return base64.b64encode(f.read()).decode()
-    except Exception:
+        # Tenta também a pasta exata onde este arquivo app.py está guardado
+        pastas_para_tentar.append(os.path.dirname(os.path.abspath(__file__)))
+    except NameError:
         pass
+
+    for pasta in set(pastas_para_tentar):
+        try:
+            for arquivo in os.listdir(pasta):
+                if arquivo.lower() == nome_alvo:
+                    caminho_completo = os.path.join(pasta, arquivo)
+                    with open(caminho_completo, "rb") as f:
+                        return base64.b64encode(f.read()).decode()
+        except Exception:
+            continue
     return None
 
-LOGO_BASE64 = carregar_logo("logo_borelli.png")
+LOGO_BASE64 = carregar_logo()
+
+# Avisa o usuário caso a imagem não tenha sido encontrada na pasta
+if LOGO_BASE64 is None:
+    st.toast("⚠️ A imagem 'logo_borelli.png' não foi encontrada na pasta. Verifique o nome do arquivo.", icon="⚠️")
 
 # ============================================================
 # TELA DE LOGIN (gate simples antes de mostrar qualquer dado)
@@ -83,7 +90,6 @@ if not st.session_state.autenticado:
                 unsafe_allow_html=True,
             )
         else:
-            # Fallback se a imagem não for encontrada
             st.markdown(
                 "<div style='text-align:center;font-size:32px;font-weight:800;color:#F8FAFC;'>BORELLI</div>"
                 "<div style='text-align:center;color:#8F9AA8;margin-bottom:24px;'>Fluxo de Caixa · Controladoria</div>",
