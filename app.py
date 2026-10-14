@@ -28,6 +28,49 @@ st.set_page_config(
 )
 
 # ============================================================
+# TELA DE LOGIN (gate simples antes de mostrar qualquer dado)
+# ============================================================
+try:
+    LOGIN_USUARIO = st.secrets.get("APP_LOGIN", "financeiro")
+    LOGIN_SENHA = st.secrets.get("APP_SENHA", "borelli2026")
+except Exception:
+    LOGIN_USUARIO, LOGIN_SENHA = "financeiro", "borelli2026"
+
+if "autenticado" not in st.session_state:
+    st.session_state.autenticado = False
+
+if not st.session_state.autenticado:
+    st.markdown("""
+    <style>
+        .stApp { background: #0B0F14; }
+        [data-testid="stHeader"] { background: rgba(11,15,20,0.96); }
+    </style>
+    """, unsafe_allow_html=True)
+
+    col_esq, col_meio, col_dir = st.columns([1, 1.2, 1])
+    with col_meio:
+        st.markdown("<br><br>", unsafe_allow_html=True)
+        st.markdown(
+            "<div style='text-align:center;font-size:40px;'>🍦</div>"
+            "<div style='text-align:center;font-size:24px;font-weight:800;color:#F8FAFC;'>BORELLI</div>"
+            "<div style='text-align:center;color:#8F9AA8;margin-bottom:24px;'>Fluxo de Caixa · Controladoria</div>",
+            unsafe_allow_html=True,
+        )
+        with st.form("form_login"):
+            usuario = st.text_input("Usuário")
+            senha = st.text_input("Senha", type="password")
+            entrar = st.form_submit_button("Entrar", use_container_width=True)
+
+        if entrar:
+            if usuario == LOGIN_USUARIO and senha == LOGIN_SENHA:
+                st.session_state.autenticado = True
+                st.rerun()
+            else:
+                st.error("Usuário ou senha incorretos.")
+
+    st.stop()  # não renderiza nada do painel abaixo enquanto não logar
+
+# ============================================================
 # IDENTIDADE VISUAL E CONSTANTES
 # ============================================================
 CACHE_API_FILE = "dados_salvos_api.pkl"
@@ -333,6 +376,11 @@ with st.sidebar:
         st.rerun()
 
     st.caption("🔐 A fonte oficial do saldo bancário continua sendo o export do Fluxo de Caixa do F360. Os dados ficam salvos até que clique em Limpar Memória.")
+
+    st.divider()
+    if st.button("🚪 Sair", use_container_width=True):
+        st.session_state.autenticado = False
+        st.rerun()
 
 # CARREGAMENTO E SALVAMENTO DE ARQUIVOS NO CACHE
 if file_fluxo_oficial: 
