@@ -23,18 +23,30 @@ except ImportError:
 
 st.set_page_config(
     page_title="Borelli | Fluxo de Caixa",
-    page_icon="🍦",
+    page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 # ============================================================
-# FUNÇÃO PARA CARREGAR A LOGO
+# FUNÇÃO BLINDADA PARA CARREGAR A LOGO LOCAL
 # ============================================================
-def carregar_logo(path):
-    if os.path.exists(path):
-        with open(path, "rb") as f:
-            return base64.b64encode(f.read()).decode()
+def carregar_logo(nome_arquivo):
+    try:
+        # Tenta primeiro procurar na exata mesma pasta do app.py
+        pasta_do_script = os.path.dirname(os.path.abspath(__file__))
+        caminho_absoluto = os.path.join(pasta_do_script, nome_arquivo)
+        
+        if os.path.exists(caminho_absoluto):
+            with open(caminho_absoluto, "rb") as f:
+                return base64.b64encode(f.read()).decode()
+                
+        # Fallback caso a primeira opção falhe
+        elif os.path.exists(nome_arquivo):
+            with open(nome_arquivo, "rb") as f:
+                return base64.b64encode(f.read()).decode()
+    except Exception:
+        pass
     return None
 
 LOGO_BASE64 = carregar_logo("logo_borelli.png")
@@ -61,19 +73,19 @@ if not st.session_state.autenticado:
 
     col_esq, col_meio, col_dir = st.columns([1, 1.2, 1])
     with col_meio:
-        st.markdown("<br><br>", unsafe_allow_html=True)
+        st.markdown("<br><br><br>", unsafe_allow_html=True)
         
         # Renderiza a Logo no Login
         if LOGO_BASE64:
             st.markdown(
-                f"<div style='text-align:center;'><img src='data:image/png;base64,{LOGO_BASE64}' style='height:100px; margin-bottom:15px;'></div>"
-                "<div style='text-align:center;color:#8F9AA8;margin-bottom:24px;'>Fluxo de Caixa · Controladoria</div>",
+                f"<div style='text-align:center;'><img src='data:image/png;base64,{LOGO_BASE64}' style='max-height:140px; margin-bottom:15px;'></div>"
+                "<div style='text-align:center;color:#8F9AA8;margin-bottom:24px;font-size:16px;'>Fluxo de Caixa · Controladoria</div>",
                 unsafe_allow_html=True,
             )
         else:
+            # Fallback se a imagem não for encontrada
             st.markdown(
-                "<div style='text-align:center;font-size:40px;'>🍦</div>"
-                "<div style='text-align:center;font-size:24px;font-weight:800;color:#F8FAFC;'>BORELLI</div>"
+                "<div style='text-align:center;font-size:32px;font-weight:800;color:#F8FAFC;'>BORELLI</div>"
                 "<div style='text-align:center;color:#8F9AA8;margin-bottom:24px;'>Fluxo de Caixa · Controladoria</div>",
                 unsafe_allow_html=True,
             )
@@ -320,9 +332,13 @@ def render_movement_cards(previsto, liquidado, aberto, titulo="Lançamentos", df
 with st.sidebar:
     # Renderiza a Logo na Sidebar
     if LOGO_BASE64:
-        st.markdown(f"<img src='data:image/png;base64,{LOGO_BASE64}' style='max-width:180px; margin-bottom:10px;'>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div style='text-align:center;'><img src='data:image/png;base64,{LOGO_BASE64}' style='max-width:160px; margin-bottom:10px;'></div>",
+            unsafe_allow_html=True
+        )
     else:
-        st.markdown("## 🍦 BORELLI")
+        st.markdown("## BORELLI")
+    
     st.caption("Controladoria · Fluxo de Caixa")
     st.divider()
 
@@ -427,9 +443,9 @@ df_api = pd.concat(_lista_dfs, ignore_index=True) if _lista_dfs else pd.DataFram
 # Renderiza a Logo no Cabeçalho
 if LOGO_BASE64:
     header_html = f"""
-    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:20px;">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:20px; margin-bottom: 20px;">
         <div>
-            <img src="data:image/png;base64,{LOGO_BASE64}" style="height:50px; margin-bottom:5px;">
+            <img src="data:image/png;base64,{LOGO_BASE64}" style="max-height:60px; margin-bottom:5px;">
             <div class="hero-subtitle">Fluxo de Caixa · Controladoria</div>
         </div>
         <div class="status-pill"><span class="status-dot"></span>F360 conectado</div>
@@ -437,8 +453,8 @@ if LOGO_BASE64:
     """
 else:
     header_html = """
-    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:20px;">
-        <div><div class="hero-title">🍦 BORELLI</div><div class="hero-subtitle">Fluxo de Caixa · Controladoria</div></div>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:20px; margin-bottom: 20px;">
+        <div><div class="hero-title">BORELLI</div><div class="hero-subtitle">Fluxo de Caixa · Controladoria</div></div>
         <div class="status-pill"><span class="status-dot"></span>F360 conectado</div>
     </div>
     """
