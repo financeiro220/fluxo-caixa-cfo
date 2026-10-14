@@ -5,6 +5,7 @@ import altair as alt
 import os
 import pickle
 import re
+import base64
 from datetime import datetime, date, timedelta
 
 # IMPORTAÇÃO DO MÓDULO F360
@@ -26,6 +27,17 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ============================================================
+# FUNÇÃO PARA CARREGAR A LOGO
+# ============================================================
+def carregar_logo(path):
+    if os.path.exists(path):
+        with open(path, "rb") as f:
+            return base64.b64encode(f.read()).decode()
+    return None
+
+LOGO_BASE64 = carregar_logo("logo_borelli.png")
 
 # ============================================================
 # TELA DE LOGIN (gate simples antes de mostrar qualquer dado)
@@ -50,12 +62,22 @@ if not st.session_state.autenticado:
     col_esq, col_meio, col_dir = st.columns([1, 1.2, 1])
     with col_meio:
         st.markdown("<br><br>", unsafe_allow_html=True)
-        st.markdown(
-            "<div style='text-align:center;font-size:40px;'>🍦</div>"
-            "<div style='text-align:center;font-size:24px;font-weight:800;color:#F8FAFC;'>BORELLI</div>"
-            "<div style='text-align:center;color:#8F9AA8;margin-bottom:24px;'>Fluxo de Caixa · Controladoria</div>",
-            unsafe_allow_html=True,
-        )
+        
+        # Renderiza a Logo no Login
+        if LOGO_BASE64:
+            st.markdown(
+                f"<div style='text-align:center;'><img src='data:image/png;base64,{LOGO_BASE64}' style='height:100px; margin-bottom:15px;'></div>"
+                "<div style='text-align:center;color:#8F9AA8;margin-bottom:24px;'>Fluxo de Caixa · Controladoria</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                "<div style='text-align:center;font-size:40px;'>🍦</div>"
+                "<div style='text-align:center;font-size:24px;font-weight:800;color:#F8FAFC;'>BORELLI</div>"
+                "<div style='text-align:center;color:#8F9AA8;margin-bottom:24px;'>Fluxo de Caixa · Controladoria</div>",
+                unsafe_allow_html=True,
+            )
+
         with st.form("form_login"):
             usuario = st.text_input("Usuário")
             senha = st.text_input("Senha", type="password")
@@ -296,7 +318,11 @@ def render_movement_cards(previsto, liquidado, aberto, titulo="Lançamentos", df
 # SIDEBAR E PROCESSAMENTO
 # ============================================================
 with st.sidebar:
-    st.markdown("## 🍦 BORELLI")
+    # Renderiza a Logo na Sidebar
+    if LOGO_BASE64:
+        st.markdown(f"<img src='data:image/png;base64,{LOGO_BASE64}' style='max-width:180px; margin-bottom:10px;'>", unsafe_allow_html=True)
+    else:
+        st.markdown("## 🍦 BORELLI")
     st.caption("Controladoria · Fluxo de Caixa")
     st.divider()
 
@@ -312,7 +338,6 @@ with st.sidebar:
             df_desp = buscar_parcelas_f360(st.session_state.jwt, d_ini, d_fim, MAPA_CNPJ_LOJA, "Despesa", log=log_desp)
             
             if not df_desp.empty: 
-                # PROTEÇÃO 1: Garante que é número e inverte descontos da folha para não somarem
                 df_desp['Valor'] = pd.to_numeric(df_desp['Valor'], errors='coerce').fillna(0)
                 
                 def corrigir_descontos(row):
@@ -399,12 +424,26 @@ df_api = pd.concat(_lista_dfs, ignore_index=True) if _lista_dfs else pd.DataFram
 # ============================================================
 # CABEÇALHO E FILTROS
 # ============================================================
-st.markdown("""
-<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:20px;">
-    <div><div class="hero-title">🍦 BORELLI</div><div class="hero-subtitle">Fluxo de Caixa · Controladoria</div></div>
-    <div class="status-pill"><span class="status-dot"></span>F360 conectado</div>
-</div>
-""", unsafe_allow_html=True)
+# Renderiza a Logo no Cabeçalho
+if LOGO_BASE64:
+    header_html = f"""
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:20px;">
+        <div>
+            <img src="data:image/png;base64,{LOGO_BASE64}" style="height:50px; margin-bottom:5px;">
+            <div class="hero-subtitle">Fluxo de Caixa · Controladoria</div>
+        </div>
+        <div class="status-pill"><span class="status-dot"></span>F360 conectado</div>
+    </div>
+    """
+else:
+    header_html = """
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:20px;">
+        <div><div class="hero-title">🍦 BORELLI</div><div class="hero-subtitle">Fluxo de Caixa · Controladoria</div></div>
+        <div class="status-pill"><span class="status-dot"></span>F360 conectado</div>
+    </div>
+    """
+
+st.markdown(header_html, unsafe_allow_html=True)
 
 f1, f2 = st.columns([2.2, 1])
 with f1:
@@ -442,7 +481,6 @@ if oficial:
         saidas_oficiais = df_of_exec["Total_Saidas"].sum()
         saldo_final_exec = df_of_exec.iloc[-1]["Saldo"]
         
-        # --- PROTEÇÃO 2: MOTOR DE CONCILIAÇÃO AUTOMÁTICA (TAXAS DE CARTÃO vs EXCEL) ---
         if not df_kpi.empty:
             despesas_api_temp = df_kpi[(df_kpi['Tipo_Movimento'] == 'DESPESA') & (df_kpi['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")]
             ajustes = []
@@ -470,7 +508,6 @@ if oficial:
                 df_ajustes = pd.DataFrame(ajustes)
                 df_kpi = pd.concat([df_kpi, df_ajustes], ignore_index=True)
 
-# Recalcula Variáveis após o Motor de Conciliação Injetar as Taxas
 df_rec_kpi = df_kpi[(df_kpi['Tipo_Movimento'] == 'RECEITA') & (df_kpi['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")] if not df_kpi.empty else pd.DataFrame()
 df_desp_kpi = df_kpi[(df_kpi['Tipo_Movimento'] == 'DESPESA') & (df_kpi['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")] if not df_kpi.empty else pd.DataFrame()
 
@@ -480,7 +517,6 @@ tot_prev = df_desp_kpi['Valor'].sum() if not df_desp_kpi.empty else 0.0
 tot_real = df_desp_kpi[df_desp_kpi['Status_Clean'] == 'REALIZADO']['Valor'].sum() if not df_desp_kpi.empty else 0.0
 tot_pend = df_desp_kpi[df_desp_kpi['Status_Clean'] == 'PENDENTE']['Valor'].sum() if not df_desp_kpi.empty else 0.0
 
-# --- PROTEÇÃO 3: SINCRONIZAR EXCEL COM A API ---
 if not df_of_exec.empty and not df_kpi.empty:
     for d in df_of_exec["Data"].dropna().unique():
         d_date = pd.to_datetime(d).date()
@@ -489,17 +525,14 @@ if not df_of_exec.empty and not df_kpi.empty:
         
         idx = df_of_exec.index[df_of_exec["Data"].dt.date == d_date]
         if not idx.empty:
-            # Se a API tiver MAIS despesas (ex: os 950 reais adicionados), o Excel e o Gráfico atualizam-se
             if api_desp > df_of_exec.loc[idx[0], "Total_Saidas"]:
                 df_of_exec.loc[idx[0], "Total_Saidas"] = api_desp
             if api_rec > df_of_exec.loc[idx[0], "Total_Entradas"]:
                 df_of_exec.loc[idx[0], "Total_Entradas"] = api_rec
     
-    # Atualiza as variáveis oficiais
     entradas_oficiais = df_of_exec["Total_Entradas"].sum()
     saidas_oficiais = df_of_exec["Total_Saidas"].sum()
 
-# Garante que usamos sempre o valor mais alto e atualizado (Excel atualizado vs API)
 entradas_exec = max((entradas_oficiais or 0), tot_rec_prev)
 saidas_exec = max((saidas_oficiais or 0), tot_prev)
 resultado_exec = entradas_exec - saidas_exec
