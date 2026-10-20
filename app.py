@@ -69,7 +69,6 @@ except Exception:
 if "autenticado" not in st.session_state:
     st.session_state.autenticado = False
 
-# Criamos uma chave para forçar o uploader a reiniciar quando limpa a memória
 if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
 
@@ -413,26 +412,20 @@ with st.sidebar:
 
     st.divider()
     st.markdown("### 🏦 Dados oficiais do caixa")
-    # Usa a chave uploader_key para forçar a renderização limpa do file uploader
     file_fluxo_oficial = st.file_uploader("F360 > Fluxo de Caixa > Exportar", type=["xlsx"], accept_multiple_files=True, key=f"fluxo_uploader_{st.session_state.uploader_key}")
     file_tabela_csv = st.file_uploader("CSV Automático (opcional)", type=["csv"], key=f"csv_uploader_{st.session_state.uploader_key}") if HAS_DOM_PROCESSOR else None
     
     st.divider()
-    
-    # === BOTÃO DE LIMPEZA CIRÚRGICA ===
     if st.button("🧹 Limpar Memória", use_container_width=True):
         if os.path.exists(CACHE_API_FILE): os.remove(CACHE_API_FILE)
         if os.path.exists(CACHE_EXCEL_FILE): os.remove(CACHE_EXCEL_FILE)
         
-        # Preserva o login e a chave de upload, deleta todo o resto
         chaves_para_manter = ["autenticado", "uploader_key"]
         for chave in list(st.session_state.keys()):
             if chave not in chaves_para_manter:
                 del st.session_state[chave]
                 
-        # Muda a chave do uploader para forçar ele a limpar o arquivo visualmente e da memória
         st.session_state.uploader_key += 1
-        
         st.rerun()
 
     st.caption("🔐 A fonte oficial do saldo bancário continua sendo o export do Fluxo de Caixa do F360. Os dados ficam salvos até que clique em Limpar Memória.")
@@ -507,6 +500,9 @@ if not oficial and len(fluxo_oficial) == 1: oficial = list(fluxo_oficial.values(
 
 df_of_exec, saldo_final_exec, entradas_oficiais, saidas_oficiais = pd.DataFrame(), None, None, None
 
+# --- NOVO MOTOR DE CONCILIAÇÃO GLOBAL (SEGURO PARA O SALDO DIÁRIO) ---
+# Não alteramos o df_of_exec dia a dia para não corromper o Saldo por divergência de Vencimento vs Pagamento.
+
 if oficial:
     df_of_exec = oficial["df"].copy()
     if isinstance(date_range, tuple) and len(date_range) == 2: df_of_exec = df_of_exec[(df_of_exec["Data"].dt.date >= date_range[0]) & (df_of_exec["Data"].dt.date <= date_range[1])]
@@ -516,31 +512,46 @@ if oficial:
         saldo_final_exec = df_of_exec.iloc[-1]["Saldo"]
         
         if not df_kpi.empty:
-            despesas_api_temp = df_kpi[(df_kpi['Tipo_Movimento'] == 'DESPESA') & (df_kpi['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")]
+            # Calcula totais da API antes do ajuste
+            tot_rec_api = df_kpi[(df_kpi['Tipo_Movimento'] == 'RECEITA') & (df_kpi['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")]['Valor'].sum()
+            tot_desp_api = df_kpi[(df_kpi['Tipo_Movimento'] == 'DESPESA') & (df_kpi['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")]['Valor'].sum()
+            
             ajustes = []
-            for d in df_of_exec["Data"].dropna().unique():
-                d_date = pd.to_datetime(d).date()
-                saida_excel = df_of_exec[df_of_exec["Data"].dt.date == d_date]["Total_Saidas"].sum()
-                saida_api = despesas_api_temp[despesas_api_temp["Vencimento_dt"].dt.date == d_date]["Valor"].sum()
+            
+            # Se o Excel tem mais despesas (ex: Taxas de Cartão retidas na fonte não puxadas na API)
+            if saidas_oficiais > tot_desp_api + 0.01:
+                ajustes.append({
+                    "Vencimento_dt": pd.to_datetime(date_range[1] if isinstance(date_range, tuple) and len(date_range) > 1 else datetime.today()),
+                    "Empresa": conta_selecionada,
+                    "Empresa_Loja": "Diversas" if conta_selecionada == "Ver Todas as Contas" else conta_selecionada,
+                    "Cliente / Fornecedor": "Ajuste F360 (Taxas de Cartões / Adquirentes)",
+                    "Plano de Contas": "Taxas de Cartão",
+                    "Categoria_CFO": "5. DESPESAS OPERACIONAIS & VENDAS",
+                    "Valor": saidas_oficiais - tot_desp_api,
+                    "Status_Clean": "REALIZADO",
+                    "Status": "Liquidado",
+                    "Tipo_Movimento": "DESPESA",
+                    "Data_Liquidacao": pd.to_datetime(date_range[1] if isinstance(date_range, tuple) and len(date_range) > 1 else datetime.today())
+                })
+            
+            # Se o Excel tem mais entradas (ex: Entradas Omitidas na API)
+            if entradas_oficiais > tot_rec_api + 0.01:
+                ajustes.append({
+                    "Vencimento_dt": pd.to_datetime(date_range[1] if isinstance(date_range, tuple) and len(date_range) > 1 else datetime.today()),
+                    "Empresa": conta_selecionada,
+                    "Empresa_Loja": "Diversas" if conta_selecionada == "Ver Todas as Contas" else conta_selecionada,
+                    "Cliente / Fornecedor": "Ajuste F360 (Entradas Omitidas na API)",
+                    "Plano de Contas": "Outras Receitas",
+                    "Categoria_CFO": "0. RECEITAS DE VENDAS",
+                    "Valor": entradas_oficiais - tot_rec_api,
+                    "Status_Clean": "REALIZADO",
+                    "Status": "Liquidado",
+                    "Tipo_Movimento": "RECEITA",
+                    "Data_Liquidacao": pd.to_datetime(date_range[1] if isinstance(date_range, tuple) and len(date_range) > 1 else datetime.today())
+                })
                 
-                diff = round(saida_excel - saida_api, 2)
-                if diff > 0.01:
-                    ajustes.append({
-                        "Vencimento_dt": pd.to_datetime(d),
-                        "Empresa": conta_selecionada,
-                        "Empresa_Loja": "Diversas" if conta_selecionada == "Ver Todas as Contas" else conta_selecionada,
-                        "Cliente / Fornecedor": "Taxas de Cartões / Adquirentes (iFood, etc)",
-                        "Plano de Contas": "Taxas de Cartão",
-                        "Categoria_CFO": "5. DESPESAS OPERACIONAIS & VENDAS",
-                        "Valor": diff,
-                        "Status_Clean": "REALIZADO",
-                        "Status": "Liquidado",
-                        "Tipo_Movimento": "DESPESA",
-                        "Data_Liquidacao": pd.to_datetime(d)
-                    })
             if ajustes:
-                df_ajustes = pd.DataFrame(ajustes)
-                df_kpi = pd.concat([df_kpi, df_ajustes], ignore_index=True)
+                df_kpi = pd.concat([df_kpi, pd.DataFrame(ajustes)], ignore_index=True)
 
 df_rec_kpi = df_kpi[(df_kpi['Tipo_Movimento'] == 'RECEITA') & (df_kpi['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")] if not df_kpi.empty else pd.DataFrame()
 df_desp_kpi = df_kpi[(df_kpi['Tipo_Movimento'] == 'DESPESA') & (df_kpi['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")] if not df_kpi.empty else pd.DataFrame()
@@ -550,43 +561,6 @@ tot_rec_real = df_rec_kpi[df_rec_kpi['Status_Clean'] == 'REALIZADO']['Valor'].su
 tot_prev = df_desp_kpi['Valor'].sum() if not df_desp_kpi.empty else 0.0
 tot_real = df_desp_kpi[df_desp_kpi['Status_Clean'] == 'REALIZADO']['Valor'].sum() if not df_desp_kpi.empty else 0.0
 tot_pend = df_desp_kpi[df_desp_kpi['Status_Clean'] == 'PENDENTE']['Valor'].sum() if not df_desp_kpi.empty else 0.0
-
-if not df_of_exec.empty and not df_kpi.empty:
-    df_of_exec = df_of_exec.sort_values("Data")
-    primeiro_idx = df_of_exec.index[0]
-    
-    saldo_base = df_of_exec.loc[primeiro_idx, "Saldo"] - df_of_exec.loc[primeiro_idx, "Total_Entradas"] + df_of_exec.loc[primeiro_idx, "Total_Saidas"]
-    modificado = False
-    
-    for d in df_of_exec["Data"].dropna().unique():
-        d_date = pd.to_datetime(d).date()
-        api_desp = df_desp_kpi[df_desp_kpi["Vencimento_dt"].dt.date == d_date]["Valor"].sum()
-        api_rec = df_rec_kpi[df_rec_kpi["Vencimento_dt"].dt.date == d_date]["Valor"].sum()
-        
-        idx = df_of_exec.index[df_of_exec["Data"].dt.date == d_date]
-        if not idx.empty:
-            i = idx[0]
-            if api_desp > df_of_exec.loc[i, "Total_Saidas"]:
-                df_of_exec.loc[i, "Total_Saidas"] = api_desp
-                modificado = True
-            if api_rec > df_of_exec.loc[i, "Total_Entradas"]:
-                df_of_exec.loc[i, "Total_Entradas"] = api_rec
-                
-                d_str = df_of_exec.loc[i, "Dia"] if "Dia" in df_of_exec.columns else None
-                if d_str and "Cartoes" in df_of_exec.columns:
-                    diff_rec = api_rec - df_of_exec.loc[i, "Total_Entradas"]
-                    df_of_exec.loc[i, "Cartoes"] += diff_rec
-                modificado = True
-    
-    if modificado:
-        saldo_acumulado = saldo_base
-        for i in df_of_exec.index:
-            saldo_acumulado += df_of_exec.loc[i, "Total_Entradas"] - df_of_exec.loc[i, "Total_Saidas"]
-            df_of_exec.loc[i, "Saldo"] = saldo_acumulado
-            
-    entradas_oficiais = df_of_exec["Total_Entradas"].sum()
-    saidas_oficiais = df_of_exec["Total_Saidas"].sum()
-    saldo_final_exec = df_of_exec.iloc[-1]["Saldo"]
 
 entradas_exec = max((entradas_oficiais or 0), tot_rec_prev)
 saidas_exec = max((saidas_oficiais or 0), tot_prev)
