@@ -493,8 +493,33 @@ oficial = fluxo_oficial.get(conta_selecionada) or fluxo_oficial.get("Ver Todas a
 if not oficial and len(fluxo_oficial) == 1: oficial = list(fluxo_oficial.values())[0]
 
 df_of_exec, saldo_final_exec, entradas_oficiais, saidas_oficiais = pd.DataFrame(), None, None, None
+saldo_atual_disponivel = None
 
 if oficial:
+    # -------------------------------------------------------------
+    # CÁLCULO DO "SALDO ATUAL" (Saldo Anterior + Entradas do Dia)
+    # -------------------------------------------------------------
+    df_full = oficial["df"].copy().sort_values("Data")
+    if not df_full.empty:
+        # Usa o final do período selecionado (ou hoje) para base de cálculo
+        ref_date = date_range[1] if isinstance(date_range, tuple) and len(date_range) == 2 else date.today()
+        df_up_to_ref = df_full[df_full["Data"].dt.date <= ref_date]
+        
+        if not df_up_to_ref.empty:
+            data_foco = df_up_to_ref.iloc[-1]["Data"]
+            entradas_do_dia = df_up_to_ref[df_up_to_ref["Data"] == data_foco]["Total_Entradas"].sum()
+            
+            df_anterior = df_up_to_ref[df_up_to_ref["Data"] < data_foco]
+            if not df_anterior.empty:
+                saldo_anterior = df_anterior.iloc[-1]["Saldo"]
+            else:
+                saldo_anterior = oficial.get("saldo_inicial", 0.0)
+            
+            saldo_atual_disponivel = float(saldo_anterior + entradas_do_dia)
+
+    # -------------------------------------------------------------
+    # VARIÁVEIS NORMAIS DO FLUXO
+    # -------------------------------------------------------------
     df_of_exec = oficial["df"].copy()
     if isinstance(date_range, tuple) and len(date_range) == 2: df_of_exec = df_of_exec[(df_of_exec["Data"].dt.date >= date_range[0]) & (df_of_exec["Data"].dt.date <= date_range[1])]
     if not df_of_exec.empty:
@@ -502,8 +527,32 @@ if oficial:
         saidas_oficiais = df_of_exec["Total_Saidas"].sum()
         saldo_final_exec = df_of_exec.iloc[-1]["Saldo"]
         
-
-# O fluxo oficial é mantido sem ajustes sintéticos da API.
+        if not df_kpi.empty:
+            despesas_api_temp = df_kpi[(df_kpi['Tipo_Movimento'] == 'DESPESA') & (df_kpi['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")]
+            ajustes = []
+            for d in df_of_exec["Data"].dropna().unique():
+                d_date = pd.to_datetime(d).date()
+                saida_excel = df_of_exec[df_of_exec["Data"].dt.date == d_date]["Total_Saidas"].sum()
+                saida_api = despesas_api_temp[despesas_api_temp["Vencimento_dt"].dt.date == d_date]["Valor"].sum()
+                
+                diff = round(saida_excel - saida_api, 2)
+                if diff > 0.01:
+                    ajustes.append({
+                        "Vencimento_dt": pd.to_datetime(d),
+                        "Empresa": conta_selecionada,
+                        "Empresa_Loja": "Diversas" if conta_selecionada == "Ver Todas as Contas" else conta_selecionada,
+                        "Cliente / Fornecedor": "Taxas de Cartões / Adquirentes (iFood, etc)",
+                        "Plano de Contas": "Taxas de Cartão",
+                        "Categoria_CFO": "5. DESPESAS OPERACIONAIS & VENDAS",
+                        "Valor": diff,
+                        "Status_Clean": "REALIZADO",
+                        "Status": "Liquidado",
+                        "Tipo_Movimento": "DESPESA",
+                        "Data_Liquidacao": pd.to_datetime(d)
+                    })
+            if ajustes:
+                df_ajustes = pd.DataFrame(ajustes)
+                df_kpi = pd.concat([df_kpi, df_ajustes], ignore_index=True)
 
 df_rec_kpi = df_kpi[(df_kpi['Tipo_Movimento'] == 'RECEITA') & (df_kpi['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")] if not df_kpi.empty else pd.DataFrame()
 df_desp_kpi = df_kpi[(df_kpi['Tipo_Movimento'] == 'DESPESA') & (df_kpi['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")] if not df_kpi.empty else pd.DataFrame()
@@ -514,14 +563,24 @@ tot_prev = df_desp_kpi['Valor'].sum() if not df_desp_kpi.empty else 0.0
 tot_real = df_desp_kpi[df_desp_kpi['Status_Clean'] == 'REALIZADO']['Valor'].sum() if not df_desp_kpi.empty else 0.0
 tot_pend = df_desp_kpi[df_desp_kpi['Status_Clean'] == 'PENDENTE']['Valor'].sum() if not df_desp_kpi.empty else 0.0
 
-# Indicadores executivos baseados exclusivamente no export oficial, quando disponível.
-# Os títulos da API permanecem nos cards e na DRE, sem modificar o caixa.
-if not df_of_exec.empty:
-    entradas_exec = float(entradas_oficiais)
-    saidas_exec = float(saidas_oficiais)
-else:
-    entradas_exec = float(tot_rec_prev)
-    saidas_exec = float(tot_prev)
+if not df_of_exec.empty and not df_kpi.empty:
+    for d in df_of_exec["Data"].dropna().unique():
+        d_date = pd.to_datetime(d).date()
+        api_desp = df_desp_kpi[df_desp_kpi["Vencimento_dt"].dt.date == d_date]["Valor"].sum()
+        api_rec = df_rec_kpi[df_rec_kpi["Vencimento_dt"].dt.date == d_date]["Valor"].sum()
+        
+        idx = df_of_exec.index[df_of_exec["Data"].dt.date == d_date]
+        if not idx.empty:
+            if api_desp > df_of_exec.loc[idx[0], "Total_Saidas"]:
+                df_of_exec.loc[idx[0], "Total_Saidas"] = api_desp
+            if api_rec > df_of_exec.loc[idx[0], "Total_Entradas"]:
+                df_of_exec.loc[idx[0], "Total_Entradas"] = api_rec
+    
+    entradas_oficiais = df_of_exec["Total_Entradas"].sum()
+    saidas_oficiais = df_of_exec["Total_Saidas"].sum()
+
+entradas_exec = max((entradas_oficiais or 0), tot_rec_prev)
+saidas_exec = max((saidas_oficiais or 0), tot_prev)
 resultado_exec = entradas_exec - saidas_exec
 
 # ============================================================
@@ -531,12 +590,13 @@ tabs = st.tabs(["📊 Visão Executiva", "📅 Fluxo Diário", "📋 DRE de Caix
 
 with tabs[0]:
     st.markdown('<div class="section-title">Resumo financeiro do período</div>', unsafe_allow_html=True)
-    c1, c2, c3, c4, c5 = st.columns(5)
-    with c1: st.markdown(f'<div class="kpi-card"><div class="kpi-label">💰 Entradas</div><div class="kpi-value kpi-green">{brl(entradas_exec)}</div><div class="kpi-foot">Caixa oficial quando disponível</div></div>', unsafe_allow_html=True)
-    with c2: st.markdown(f'<div class="kpi-card"><div class="kpi-label">🔴 Saídas</div><div class="kpi-value kpi-red">{brl(saidas_exec)}</div><div class="kpi-foot">Realizadas + previstas do caixa</div></div>', unsafe_allow_html=True)
-    with c3: st.markdown(f'<div class="kpi-card"><div class="kpi-label">📈 Resultado do Caixa</div><div class="kpi-value {"kpi-green" if resultado_exec >= 0 else "kpi-red"}">{brl(resultado_exec)}</div><div class="kpi-foot">Entradas − saídas</div></div>', unsafe_allow_html=True)
-    with c4: st.markdown(f'<div class="kpi-card"><div class="kpi-label">🏦 Saldo Final</div><div class="kpi-value {"kpi-green" if (saldo_final_exec or 0) >= 0 else "kpi-red"}">{brl(saldo_final_exec) if saldo_final_exec is not None else "—"}</div><div class="kpi-foot">Saldo do export oficial F360</div></div>', unsafe_allow_html=True)
-    with c5: st.markdown(f'<div class="kpi-card"><div class="kpi-label">⚠️ Em Aberto</div><div class="kpi-value {"kpi-green" if tot_pend == 0 else "kpi-yellow"}">{brl(tot_pend)}</div><div class="kpi-foot">{"Nenhuma despesa pendente" if tot_pend == 0 else "Despesas ainda em aberto"}</div></div>', unsafe_allow_html=True)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    with c1: st.markdown(f'<div class="kpi-card"><div class="kpi-label">💰 Entradas Reais</div><div class="kpi-value kpi-green">{brl(entradas_exec)}</div><div class="kpi-foot">Dinheiro liquidado no banco</div></div>', unsafe_allow_html=True)
+    with c2: st.markdown(f'<div class="kpi-card"><div class="kpi-label">🔴 Saídas</div><div class="kpi-value kpi-red">{brl(saidas_exec)}</div><div class="kpi-foot">Caixa Pago + Pendente da API</div></div>', unsafe_allow_html=True)
+    with c3: st.markdown(f'<div class="kpi-card"><div class="kpi-label">📈 Resultado</div><div class="kpi-value {"kpi-green" if resultado_exec >= 0 else "kpi-red"}">{brl(resultado_exec)}</div><div class="kpi-foot">Entradas − saídas</div></div>', unsafe_allow_html=True)
+    with c4: st.markdown(f'<div class="kpi-card"><div class="kpi-label">💲 Saldo Atual</div><div class="kpi-value {"kpi-green" if (saldo_atual_disponivel or 0) >= 0 else "kpi-red"}">{brl(saldo_atual_disponivel) if saldo_atual_disponivel is not None else "—"}</div><div class="kpi-foot">Saldo anterior + Entradas</div></div>', unsafe_allow_html=True)
+    with c5: st.markdown(f'<div class="kpi-card"><div class="kpi-label">🏦 Saldo Final</div><div class="kpi-value {"kpi-green" if (saldo_final_exec or 0) >= 0 else "kpi-red"}">{brl(saldo_final_exec) if saldo_final_exec is not None else "—"}</div><div class="kpi-foot">Saldo do export oficial F360</div></div>', unsafe_allow_html=True)
+    with c6: st.markdown(f'<div class="kpi-card"><div class="kpi-label">⚠️ Em Aberto</div><div class="kpi-value {"kpi-green" if tot_pend == 0 else "kpi-yellow"}">{brl(tot_pend)}</div><div class="kpi-foot">{"Nenhuma despesa pendente" if tot_pend == 0 else "Despesas ainda em aberto"}</div></div>', unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
     if saldo_final_exec is not None and saldo_final_exec < 0: st.markdown('<div class="alert-danger">🔴 Atenção: o saldo final do período está negativo.</div>', unsafe_allow_html=True)
