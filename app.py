@@ -4,8 +4,9 @@ import numpy as np
 import altair as alt
 import os
 import pickle
+import re
 import base64
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 # IMPORTAÇÃO DO MÓDULO F360
 from f360_api import (
@@ -28,7 +29,7 @@ st.set_page_config(
 )
 
 # ============================================================
-# FUNÇÃO PARA CARREGAR A LOGO LOCAL (COM CAMINHO ABSOLUTO)
+# FUNÇÃO BLINDADA PARA CARREGAR A LOGO LOCAL (COM CAMINHO ABSOLUTO)
 # ============================================================
 @st.cache_data
 def carregar_logo():
@@ -38,7 +39,7 @@ def carregar_logo():
         ".", 
         os.path.dirname(os.path.abspath(__file__)),
         os.getcwd(),
-        r"C:\Users\USUARIO\OneDrive\Área de Trabalho\fluxo-caixa-cfo"
+        r"C:\Users\USUARIO\OneDrive\Área de Trabalho\fluxo-caixa-cfo" # Caminho absoluto forçado
     ]
 
     for pasta in set(pastas_para_tentar):
@@ -56,8 +57,11 @@ def carregar_logo():
 
 LOGO_BASE64 = carregar_logo()
 
+if LOGO_BASE64 is None:
+    st.toast("⚠️ Imagem da logo não encontrada nem no caminho absoluto do OneDrive.", icon="⚠️")
+
 # ============================================================
-# TELA DE LOGIN E ESTADO DA SESSÃO
+# TELA DE LOGIN (gate simples antes de mostrar qualquer dado)
 # ============================================================
 try:
     LOGIN_USUARIO = st.secrets.get("APP_LOGIN", "financeiro")
@@ -67,9 +71,6 @@ except Exception:
 
 if "autenticado" not in st.session_state:
     st.session_state.autenticado = False
-
-if "uploader_key" not in st.session_state:
-    st.session_state.uploader_key = 0
 
 if not st.session_state.autenticado:
     st.markdown("""
@@ -149,8 +150,19 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+try:
+    F360_TOKEN = st.secrets["F360_TOKEN"]
+except:
+    F360_TOKEN = "11001cbb-792d-45e5-b2f9-03ffc46fe7ed"
+
+MAPA_CNPJ_LOJA = {
+    "36240923000168": "4- PANTANAL",
+    "36240923000249": "5- ESTAÇÃO",
+    "36240923000320": "8 - GOIABEIRAS"
+}
+
 # ============================================================
-# FUNÇÕES DE LÓGICA
+# FUNÇÕES E SISTEMA DE MEMÓRIA LOCAL
 # ============================================================
 if 'fluxo_oficial_cache' not in st.session_state:
     st.session_state.fluxo_oficial_cache = {}
@@ -169,10 +181,25 @@ if 'api_loaded' not in st.session_state:
                 api_data = pickle.load(f)
             st.session_state.df_api_desp = api_data.get('desp', pd.DataFrame())
             st.session_state.df_api_rec = api_data.get('rec', pd.DataFrame())
+            st.session_state.log_api_desp = api_data.get('log_desp', [])
+            st.session_state.log_api_rec = api_data.get('log_rec', [])
+            st.session_state.log_api_periodo = api_data.get('periodo', None)
         except Exception:
             pass
 
 if 'show_kpi_data' not in st.session_state: st.session_state.show_kpi_data = None
+
+def categorizar_plano_contas(plano):
+    p = str(plano).upper().strip()
+    if any(k in p for k in ['MÚTUO', 'MUTUO', 'INTERCOMPANY', 'APLICAÇÃO']): return "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO"
+    if any(k in p for k in ['SÓCIO', 'SOCIO', 'LUCRO', 'DISTRIBUIÇÃO', 'DIVIDENDO', 'PRÓ-LABORE', 'PRO-LABORE']): return "7. DESPESAS DE SÓCIOS"
+    if any(k in p for k in ['SALÁRIO', 'VALE', 'FOLHA', 'FGTS', 'FÉRIAS', 'RESCISÃO', 'FUNCIONÁRIOS', 'FREELANCE', 'DIARISTA', 'MÉDICO', 'INSS', 'SINDICATO', 'VT', 'VR']): return "4. FOLHA DE PAGAMENTO & ENCARGOS"
+    if any(k in p for k in ['CMV', 'DESCARTÁVEIS', 'LEITE', 'INSUMO', 'BOBINA', 'FRUTA', 'COMPRAS', 'MERCADORIA']): return "1. FORNECEDORES / MERCADORIAS (CMV)"
+    if any(k in p for k in ['ICMS', 'IMPOSTO', 'FISCAL', 'DAS', 'TAXAS MUNICIPAIS', 'PIS', 'COFINS', 'ISS', 'SIMPLES']): return "2. IMPOSTOS SOBRE VENDAS"
+    if any(k in p for k in ['ALUGUEL', 'CONDOMÍNIO', 'ENERGIA', 'ÁGUA', 'IPTU', 'LUZ', 'INTERNET', 'SEGURO PREDIAL', 'TELEFONE']): return "3. DESPESAS DE OCUPAÇÃO"
+    if any(k in p for k in ['EMPRÉSTIMO', 'CAPITAL DE GIRO', 'JUROS', 'MULTA', 'TARIFA', 'TAXA', 'MAQUININHA', 'BANCÁRIA']): return "6. AMORTIZAÇÃO DE DÍVIDAS & CAPITAL"
+    if any(k in p for k in ['LIMPEZA', 'MANUTENÇÃO', 'CONTABILIDADE', 'MARKETING', 'IFOOD', 'SISTEMA', 'HONORÁRIO', 'MATERIAL']): return "5. DESPESAS OPERACIONAIS & VENDAS"
+    return "5. DESPESAS OPERACIONAIS & VENDAS"
 
 def categorizar_receita(row):
     p = str(row.get("Plano de Contas") or "").upper().strip()
@@ -186,6 +213,8 @@ def carregar_fluxo_oficial(_arquivos):
         df_dias, saldo_ini, contas = processar_fluxo_de_caixa_oficial(arq)
         nome = getattr(arq, "name", "Arquivo")
         chave = contas[0] if len(contas) == 1 else "Ver Todas as Contas"
+        if chave in resultado and chave == "Ver Todas as Contas":
+            st.toast(f"⚠️ Aviso: O ficheiro '{nome}' substituiu a tabela do ficheiro anterior porque partilham o mesmo nível de visualização.")
         resultado[chave] = {"df": df_dias, "saldo_inicial": saldo_ini, "contas": contas}
     return resultado
 
@@ -309,7 +338,10 @@ def render_movement_cards(previsto, liquidado, aberto, titulo="Lançamentos", df
 # ============================================================
 with st.sidebar:
     if LOGO_BASE64:
-        st.markdown(f"<div style='text-align:center;'><img src='data:image/png;base64,{LOGO_BASE64}' style='max-width:160px; margin-bottom:10px;'></div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div style='text-align:center;'><img src='data:image/png;base64,{LOGO_BASE64}' style='max-width:160px; margin-bottom:10px;'></div>",
+            unsafe_allow_html=True
+        )
     else:
         st.markdown("## BORELLI")
     
@@ -333,7 +365,8 @@ with st.sidebar:
                 def corrigir_descontos(row):
                     val = row['Valor']
                     plano = str(row.get('Plano de Contas', '')).upper()
-                    if "DESCONTO" in plano and val > 0: return -val
+                    if "DESCONTO" in plano and val > 0:
+                        return -val
                     return val
                 df_desp['Valor'] = df_desp.apply(corrigir_descontos, axis=1)
                 
@@ -350,44 +383,53 @@ with st.sidebar:
                     return "5. DESPESAS OPERACIONAIS & VENDAS"
                     
                 df_desp["Categoria_CFO"] = df_desp["Plano de Contas"].apply(cat_desp)
-            st.session_state.df_api_desp = df_desp
+            st.session_state.df_api_desp, st.session_state.log_api_desp = df_desp, log_desp
 
             df_rec = buscar_parcelas_f360(st.session_state.jwt, d_ini, d_fim, MAPA_CNPJ_LOJA, "Receita", log=log_rec)
             if not df_rec.empty:
                 df_rec["Categoria_CFO"] = df_rec.apply(categorizar_receita, axis=1)
                 df_rec["Tipo_Movimento"] = "RECEITA"
-            st.session_state.df_api_rec = df_rec
+            st.session_state.df_api_rec, st.session_state.log_api_rec = df_rec, log_rec
+            st.session_state.log_api_periodo = (d_ini, d_fim)
             
             with open(CACHE_API_FILE, 'wb') as f:
-                pickle.dump({'desp': df_desp, 'rec': df_rec}, f)
+                pickle.dump({
+                    'desp': df_desp, 'rec': df_rec,
+                    'log_desp': log_desp, 'log_rec': log_rec,
+                    'periodo': (d_ini, d_fim)
+                }, f)
                 
             st.success(f"🟢 API sincronizada! Despesas: {len(df_desp):,} | Receitas: {len(df_rec):,}")
 
+    with st.expander("🔎 LOG / DIAGNÓSTICO DA API F360", expanded=False):
+        logs_d = st.session_state.get("log_api_desp", [])
+        logs_r = st.session_state.get("log_api_rec", [])
+        periodo_log = st.session_state.get("log_api_periodo")
+        if periodo_log: st.caption(f"Período consultado: {periodo_log[0]:%d/%m/%Y} até {periodo_log[1]:%d/%m/%Y}")
+        if logs_d: st.markdown("**DESPESAS**"); st.code("\n".join(logs_d), language="text")
+        if logs_r: st.markdown("**RECEITAS**"); st.code("\n".join(logs_r), language="text")
+        if not logs_d and not logs_r: st.info("Clique em '🚀 Sincronizar API' para gerar o log.")
+
     st.divider()
     st.markdown("### 🏦 Dados oficiais do caixa")
-    file_fluxo_oficial = st.file_uploader("F360 > Fluxo de Caixa > Exportar", type=["xlsx"], accept_multiple_files=True, key=f"fluxo_uploader_{st.session_state.uploader_key}")
-    file_tabela_csv = st.file_uploader("CSV Automático (opcional)", type=["csv"], key=f"csv_uploader_{st.session_state.uploader_key}") if HAS_DOM_PROCESSOR else None
+    file_fluxo_oficial = st.file_uploader("F360 > Fluxo de Caixa > Exportar", type=["xlsx"], accept_multiple_files=True)
+    file_tabela_csv = st.file_uploader("CSV Automático (opcional)", type=["csv"], key="tabela_csv") if HAS_DOM_PROCESSOR else None
     
     st.divider()
     if st.button("🧹 Limpar Memória", use_container_width=True):
         if os.path.exists(CACHE_API_FILE): os.remove(CACHE_API_FILE)
         if os.path.exists(CACHE_EXCEL_FILE): os.remove(CACHE_EXCEL_FILE)
-        
-        chaves_para_manter = ["autenticado", "uploader_key"]
-        for chave in list(st.session_state.keys()):
-            if chave not in chaves_para_manter:
-                del st.session_state[chave]
-                
-        st.session_state.uploader_key += 1
+        st.session_state.clear()
         st.rerun()
 
-    st.caption("🔐 A fonte oficial do saldo bancário é o export do Fluxo de Caixa. Limpe a memória sempre que subir arquivos novos.")
+    st.caption("🔐 A fonte oficial do saldo bancário continua sendo o export do Fluxo de Caixa do F360. Os dados ficam salvos até que clique em Limpar Memória.")
+
     st.divider()
     if st.button("🚪 Sair", use_container_width=True):
         st.session_state.autenticado = False
         st.rerun()
 
-# CARREGAMENTO DE ARQUIVOS
+# CARREGAMENTO E SALVAMENTO DE ARQUIVOS NO CACHE
 if file_fluxo_oficial: 
     st.session_state.fluxo_oficial_cache.update(carregar_fluxo_oficial(file_fluxo_oficial))
     with open(CACHE_EXCEL_FILE, 'wb') as f: pickle.dump(st.session_state.fluxo_oficial_cache, f)
@@ -407,15 +449,21 @@ df_api = pd.concat(_lista_dfs, ignore_index=True) if _lista_dfs else pd.DataFram
 if LOGO_BASE64:
     header_html = f"""
     <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:20px; margin-bottom: 20px;">
-        <div><img src="data:image/png;base64,{LOGO_BASE64}" style="max-height:60px; margin-bottom:5px;"><div class="hero-subtitle">Fluxo de Caixa · Controladoria</div></div>
+        <div>
+            <img src="data:image/png;base64,{LOGO_BASE64}" style="max-height:60px; margin-bottom:5px;">
+            <div class="hero-subtitle">Fluxo de Caixa · Controladoria</div>
+        </div>
         <div class="status-pill"><span class="status-dot"></span>F360 conectado</div>
-    </div>"""
+    </div>
+    """
 else:
     header_html = """
     <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:20px; margin-bottom: 20px;">
         <div><div class="hero-title">BORELLI</div><div class="hero-subtitle">Fluxo de Caixa · Controladoria</div></div>
         <div class="status-pill"><span class="status-dot"></span>F360 conectado</div>
-    </div>"""
+    </div>
+    """
+
 st.markdown(header_html, unsafe_allow_html=True)
 
 f1, f2 = st.columns([2.2, 1])
@@ -434,7 +482,7 @@ with f2:
     date_range = st.date_input("Período", value=(min_d, max_d), format="DD/MM/YYYY")
 
 # ============================================================
-# CÁLCULOS E SEPARAÇÃO: CAIXA (EXCEL) VS DRE (API)
+# FILTRO API E VARIÁVEIS GLOBAIS
 # ============================================================
 df_kpi = df_api.copy()
 if not df_kpi.empty:
@@ -444,33 +492,19 @@ if not df_kpi.empty:
 oficial = fluxo_oficial.get(conta_selecionada) or fluxo_oficial.get("Ver Todas as Contas") or fluxo_oficial.get("CSV (via navegador)")
 if not oficial and len(fluxo_oficial) == 1: oficial = list(fluxo_oficial.values())[0]
 
-# --- REGRA DE OURO DA CONTROLADORIA: O DATAFRAME DO EXCEL É INTOCÁVEL ---
-df_of_exec = pd.DataFrame()
-entradas_oficiais = 0.0
-saidas_oficiais = 0.0
-saldo_final_exec = None
-saldo_atual_hoje = None # NOVO SALDO FIXO DO DIA
+df_of_exec, saldo_final_exec, entradas_oficiais, saidas_oficiais = pd.DataFrame(), None, None, None
 
 if oficial:
     df_of_exec = oficial["df"].copy()
-    
-    # 1. Pega o Saldo Real de Hoje ANTES de filtrar o calendário
-    hoje = date.today()
-    if not df_of_exec.empty:
-        df_ate_hoje = df_of_exec[df_of_exec["Data"].dt.date <= hoje]
-        saldo_atual_hoje = df_ate_hoje.iloc[-1]["Saldo"] if not df_ate_hoje.empty else df_of_exec.iloc[-1]["Saldo"]
-
-    # 2. Aplica o filtro do calendário do utilizador
-    if isinstance(date_range, tuple) and len(date_range) == 2: 
-        df_of_exec = df_of_exec[(df_of_exec["Data"].dt.date >= date_range[0]) & (df_of_exec["Data"].dt.date <= date_range[1])]
-    
-    # 3. Calcula as métricas do período selecionado
+    if isinstance(date_range, tuple) and len(date_range) == 2: df_of_exec = df_of_exec[(df_of_exec["Data"].dt.date >= date_range[0]) & (df_of_exec["Data"].dt.date <= date_range[1])]
     if not df_of_exec.empty:
         entradas_oficiais = df_of_exec["Total_Entradas"].sum()
         saidas_oficiais = df_of_exec["Total_Saidas"].sum()
         saldo_final_exec = df_of_exec.iloc[-1]["Saldo"]
+        
 
-# Variáveis da API (Bruto / Competência / Títulos)
+# O fluxo oficial é mantido sem ajustes sintéticos da API.
+
 df_rec_kpi = df_kpi[(df_kpi['Tipo_Movimento'] == 'RECEITA') & (df_kpi['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")] if not df_kpi.empty else pd.DataFrame()
 df_desp_kpi = df_kpi[(df_kpi['Tipo_Movimento'] == 'DESPESA') & (df_kpi['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")] if not df_kpi.empty else pd.DataFrame()
 
@@ -480,9 +514,14 @@ tot_prev = df_desp_kpi['Valor'].sum() if not df_desp_kpi.empty else 0.0
 tot_real = df_desp_kpi[df_desp_kpi['Status_Clean'] == 'REALIZADO']['Valor'].sum() if not df_desp_kpi.empty else 0.0
 tot_pend = df_desp_kpi[df_desp_kpi['Status_Clean'] == 'PENDENTE']['Valor'].sum() if not df_desp_kpi.empty else 0.0
 
-# Valores Consolidados Visão Executiva (Caixa Real do Banco + Pendências da API)
-entradas_exec = entradas_oficiais
-saidas_exec = saidas_oficiais + tot_pend
+# Indicadores executivos baseados exclusivamente no export oficial, quando disponível.
+# Os títulos da API permanecem nos cards e na DRE, sem modificar o caixa.
+if not df_of_exec.empty:
+    entradas_exec = float(entradas_oficiais)
+    saidas_exec = float(saidas_oficiais)
+else:
+    entradas_exec = float(tot_rec_prev)
+    saidas_exec = float(tot_prev)
 resultado_exec = entradas_exec - saidas_exec
 
 # ============================================================
@@ -493,26 +532,21 @@ tabs = st.tabs(["📊 Visão Executiva", "📅 Fluxo Diário", "📋 DRE de Caix
 with tabs[0]:
     st.markdown('<div class="section-title">Resumo financeiro do período</div>', unsafe_allow_html=True)
     c1, c2, c3, c4, c5 = st.columns(5)
-    with c1: st.markdown(f'<div class="kpi-card"><div class="kpi-label">💰 Entradas Reais</div><div class="kpi-value kpi-green">{brl(entradas_exec)}</div><div class="kpi-foot">Dinheiro liquidado no banco</div></div>', unsafe_allow_html=True)
-    with c2: st.markdown(f'<div class="kpi-card"><div class="kpi-label">🔴 Saídas</div><div class="kpi-value kpi-red">{brl(saidas_exec)}</div><div class="kpi-foot">Caixa Pago + Pendente da API</div></div>', unsafe_allow_html=True)
-    with c3: st.markdown(f'<div class="kpi-card"><div class="kpi-label">📈 Resultado</div><div class="kpi-value {"kpi-green" if resultado_exec >= 0 else "kpi-red"}">{brl(resultado_exec)}</div><div class="kpi-foot">Entradas − saídas do período</div></div>', unsafe_allow_html=True)
-    with c4: st.markdown(f'<div class="kpi-card"><div class="kpi-label">🏦 Saldo Atual (Hoje)</div><div class="kpi-value {"kpi-green" if (saldo_atual_hoje or 0) >= 0 else "kpi-red"}">{brl(saldo_atual_hoje) if saldo_atual_hoje is not None else "—"}</div><div class="kpi-foot">{"Projeção do filtro: " + brl(saldo_final_exec) if saldo_final_exec is not None else "Extrato exato da conta"}</div></div>', unsafe_allow_html=True)
-    with c5: st.markdown(f'<div class="kpi-card"><div class="kpi-label">⚠️ Em Aberto</div><div class="kpi-value {"kpi-green" if tot_pend == 0 else "kpi-yellow"}">{brl(tot_pend)}</div><div class="kpi-foot">{"Nenhuma pendência" if tot_pend == 0 else "Despesas pendentes na API"}</div></div>', unsafe_allow_html=True)
+    with c1: st.markdown(f'<div class="kpi-card"><div class="kpi-label">💰 Entradas</div><div class="kpi-value kpi-green">{brl(entradas_exec)}</div><div class="kpi-foot">Caixa oficial quando disponível</div></div>', unsafe_allow_html=True)
+    with c2: st.markdown(f'<div class="kpi-card"><div class="kpi-label">🔴 Saídas</div><div class="kpi-value kpi-red">{brl(saidas_exec)}</div><div class="kpi-foot">Realizadas + previstas do caixa</div></div>', unsafe_allow_html=True)
+    with c3: st.markdown(f'<div class="kpi-card"><div class="kpi-label">📈 Resultado do Caixa</div><div class="kpi-value {"kpi-green" if resultado_exec >= 0 else "kpi-red"}">{brl(resultado_exec)}</div><div class="kpi-foot">Entradas − saídas</div></div>', unsafe_allow_html=True)
+    with c4: st.markdown(f'<div class="kpi-card"><div class="kpi-label">🏦 Saldo Final</div><div class="kpi-value {"kpi-green" if (saldo_final_exec or 0) >= 0 else "kpi-red"}">{brl(saldo_final_exec) if saldo_final_exec is not None else "—"}</div><div class="kpi-foot">Saldo do export oficial F360</div></div>', unsafe_allow_html=True)
+    with c5: st.markdown(f'<div class="kpi-card"><div class="kpi-label">⚠️ Em Aberto</div><div class="kpi-value {"kpi-green" if tot_pend == 0 else "kpi-yellow"}">{brl(tot_pend)}</div><div class="kpi-foot">{"Nenhuma despesa pendente" if tot_pend == 0 else "Despesas ainda em aberto"}</div></div>', unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
-    if saldo_atual_hoje is not None and saldo_atual_hoje < 0:
-        st.markdown('<div class="alert-danger">🔴 URGENTE: O saldo da sua conta bancária hoje está NEGATIVO.</div>', unsafe_allow_html=True)
-    elif saldo_final_exec is not None and saldo_final_exec < 0: 
-        st.markdown('<div class="alert-warn">🟡 Atenção: A projeção para o final do período selecionado ficará negativa.</div>', unsafe_allow_html=True)
-    elif tot_pend > 0: 
-        st.markdown(f'<div class="alert-warn">🟡 Atenção: existem {brl(tot_pend)} em despesas pendentes para o período.</div>', unsafe_allow_html=True)
-    else: 
-        st.markdown('<div class="alert-good">🟢 Conta Positiva e sem despesas pendentes identificadas.</div>', unsafe_allow_html=True)
+    if saldo_final_exec is not None and saldo_final_exec < 0: st.markdown('<div class="alert-danger">🔴 Atenção: o saldo final do período está negativo.</div>', unsafe_allow_html=True)
+    elif tot_pend > 0: st.markdown(f'<div class="alert-warn">🟡 Atenção: existem {brl(tot_pend)} em despesas pendentes na API.</div>', unsafe_allow_html=True)
+    else: st.markdown('<div class="alert-good">🟢 Caixa sem despesas pendentes identificadas na API para o período filtrado.</div>', unsafe_allow_html=True)
     st.markdown("<br>", unsafe_allow_html=True)
 
     g1, g2 = st.columns([1.75, 1])
     with g1:
-        st.markdown('<div class="panel"><div class="panel-header"><div class="panel-title">Evolução do Caixa Bancário Diário</div><div class="muted">Excel</div></div></div>', unsafe_allow_html=True)
+        st.markdown('<div class="panel"><div class="panel-header"><div class="panel-title">Fluxo de Caixa · Entradas × Saídas</div><div class="muted">por dia</div></div></div>', unsafe_allow_html=True)
         if not df_of_exec.empty:
             chart_df = df_of_exec[["Data", "Total_Entradas", "Total_Saidas"]].copy()
             chart_df.columns = ["Data", "Entradas", "Saídas"]
@@ -526,6 +560,7 @@ with tabs[0]:
                 return f"{val:.0f}"
                 
             df_melt['Rotulo'] = df_melt['Valor'].apply(formata_k)
+            
             max_y = df_melt['Valor'].max()
             max_y = max_y * 1.15 if pd.notna(max_y) and max_y > 0 else 100
             
@@ -539,16 +574,27 @@ with tabs[0]:
                 color=alt.Color("Tipo:N", scale=alt.Scale(domain=["Entradas", "Saídas"], range=["#45D483", "#FF6262"]), legend=alt.Legend(title="", orient="bottom")),
                 tooltip=[alt.Tooltip("Data_str:O", title="Data"), alt.Tooltip("Tipo:N", title="Tipo"), alt.Tooltip("Valor:Q", title="R$", format=",.2f")]
             )
-            textos = base.mark_text(align='center', baseline='bottom', dy=-8, fontSize=13, fontWeight="bold", color="#F8FAFC").encode(text=alt.Text('Rotulo:N'))
+            
+            textos = base.mark_text(
+                align='center',
+                baseline='bottom',
+                dy=-8,
+                fontSize=13,
+                fontWeight="bold",
+                color="#F8FAFC"
+            ).encode(
+                text=alt.Text('Rotulo:N')
+            )
             
             st.altair_chart((barras + textos).properties(height=280), use_container_width=True)
         else: st.info("Anexe o export 'Fluxo de Caixa.xlsx' para visualizar o fluxo diário oficial.")
 
     with g2:
-        st.markdown('<div class="panel"><div class="panel-header"><div class="panel-title">Composição das Despesas Brutas</div><div class="muted">API</div></div></div>', unsafe_allow_html=True)
+        st.markdown('<div class="panel"><div class="panel-header"><div class="panel-title">Composição das Saídas</div><div class="muted">API F360</div></div></div>', unsafe_allow_html=True)
         if not df_desp_kpi.empty:
             comp = df_desp_kpi.groupby("Categoria_CFO")["Valor"].sum().sort_values(ascending=True)
             comp.index = [str(x).replace("1. ", "").replace("2. ", "").replace("3. ", "").replace("4. ", "").replace("5. ", "").replace("6. ", "").replace("7. ", "") for x in comp.index]
+            
             comp_df = comp.reset_index()
             comp_df.columns = ["Categoria", "Valor"]
             
@@ -558,6 +604,7 @@ with tabs[0]:
                 return f"{val:.0f}"
                 
             comp_df['Rotulo'] = comp_df['Valor'].apply(formata_k_comp)
+            
             max_x = comp_df['Valor'].max()
             max_x = max_x * 1.2 if pd.notna(max_x) and max_x > 0 else 100
             
@@ -566,67 +613,121 @@ with tabs[0]:
                 y=alt.Y("Categoria:N", sort="-x", title="", axis=alt.Axis(labelAngle=0, labelLimit=300))
             )
             
-            barras_comp = base_comp.mark_bar(color="#69B7FF", cornerRadiusEnd=3).encode(tooltip=[alt.Tooltip("Categoria:N", title="Categoria"), alt.Tooltip("Valor:Q", title="R$", format=",.2f")])
-            textos_comp = base_comp.mark_text(align='left', baseline='middle', dx=5, fontSize=13, fontWeight="bold", color="#F8FAFC").encode(text=alt.Text('Rotulo:N'))
+            barras_comp = base_comp.mark_bar(color="#69B7FF", cornerRadiusEnd=3).encode(
+                tooltip=[alt.Tooltip("Categoria:N", title="Categoria"), alt.Tooltip("Valor:Q", title="R$", format=",.2f")]
+            )
+            
+            textos_comp = base_comp.mark_text(
+                align='left',
+                baseline='middle',
+                dx=5,
+                fontSize=13,
+                fontWeight="bold",
+                color="#F8FAFC"
+            ).encode(
+                text=alt.Text('Rotulo:N')
+            )
             
             st.altair_chart((barras_comp + textos_comp).properties(height=280), use_container_width=True)
         else: st.info("Sincronize a API para visualizar a composição das despesas.")
 
     st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown('<div class="section-title">📅 Projeção Intocável do Saldo Bancário</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">🏪 Resultado por Loja</div>', unsafe_allow_html=True)
+    if not df_api.empty:
+        df_loja_exec = df_kpi.copy()
+        dimensao_exec = "Empresa_Loja" if ("Empresa_Loja" in df_loja_exec.columns and df_loja_exec["Empresa_Loja"].replace("", np.nan).notna().any()) else "Empresa"
+        rec_loja = df_loja_exec[(df_loja_exec["Tipo_Movimento"] == "RECEITA") & (df_loja_exec["Categoria_CFO"] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")].groupby(dimensao_exec)["Valor"].sum()
+        desp_loja = df_loja_exec[(df_loja_exec["Tipo_Movimento"] == "DESPESA") & (df_loja_exec["Categoria_CFO"] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")].groupby(dimensao_exec)["Valor"].sum()
+        resumo_loja = pd.concat([rec_loja.rename("Entradas"), desp_loja.rename("Saídas")], axis=1).fillna(0)
+        resumo_loja["Resultado (Receita - Despesa)"] = resumo_loja["Entradas"] - resumo_loja["Saídas"]
+        resumo_loja = resumo_loja.sort_values("Resultado (Receita - Despesa)", ascending=False)
+        
+        def formatar_tabela_loja(val):
+            if isinstance(val, (int, float)):
+                if val == 0: return "—"
+                return f"R$ {val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            return val
+            
+        def style_loja_resultado(val):
+            if isinstance(val, (int, float)):
+                if val < 0: return 'color: #FF6262; font-weight: bold;'
+                elif val > 0: return 'color: #45D483; font-weight: bold;'
+            return ''
+            
+        try:
+            st.dataframe(resumo_loja.style.format(formatar_tabela_loja).map(style_loja_resultado, subset=["Resultado (Receita - Despesa)"]), use_container_width=True)
+        except Exception:
+            st.dataframe(resumo_loja, use_container_width=True)
+    else: st.info("Sincronize a API para gerar o comparativo por loja.")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown('<div class="section-title">📅 Projeção do Caixa</div>', unsafe_allow_html=True)
     if not df_of_exec.empty:
         proj = df_of_exec[["Data", "Total_Entradas", "Total_Saidas", "Saldo"]].copy()
         proj.columns = ["Data", "Entradas", "Saídas", "Saldo"]
+        
         proj['Data'] = pd.to_datetime(proj['Data']).dt.strftime('%d/%m/%Y')
+        
         def colorir_saldo(val):
             if isinstance(val, (int, float)):
                 if val < 0: return 'color: #FF6262; font-weight: bold;'
                 elif val > 0: return 'color: #45D483; font-weight: bold;'
             return ''
+
         try:
-            st.dataframe(proj.tail(10).style.format({"Entradas": "R$ {:,.2f}", "Saídas": "R$ {:,.2f}", "Saldo": "R$ {:,.2f}"}).map(colorir_saldo, subset=['Saldo']), use_container_width=True, hide_index=True)
-        except:
+            tabela_formatada = proj.tail(10).style.format({
+                "Entradas": "R$ {:,.2f}", 
+                "Saídas": "R$ {:,.2f}", 
+                "Saldo": "R$ {:,.2f}"
+            }).map(colorir_saldo, subset=['Saldo'])
+            
+            st.dataframe(tabela_formatada, use_container_width=True, hide_index=True)
+        except Exception:
             st.dataframe(proj.tail(10), use_container_width=True, hide_index=True)
+    else: 
+        st.info("A projeção diária utiliza os dados do export oficial do Fluxo de Caixa F360.")
 
 with tabs[1]:
     if oficial:
-        df_cards = df_of_exec.copy()
+        df_cards = oficial["df"].copy()
+        if isinstance(date_range, tuple) and len(date_range) == 2: df_cards = df_cards[(df_cards["Data"].dt.date >= date_range[0]) & (df_cards["Data"].dt.date <= date_range[1])]
 
         if not df_api.empty:
             df_cards_api = df_kpi.copy()
+            
             rec_cards = df_cards_api[(df_cards_api["Tipo_Movimento"] == "RECEITA") & (df_cards_api["Categoria_CFO"] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")]
             prev_rec = rec_cards["Valor"].sum() if not rec_cards.empty else 0.0
             liq_rec = rec_cards[rec_cards["Status_Clean"] == "REALIZADO"]["Valor"].sum() if not rec_cards.empty else 0.0
             aberto_rec = rec_cards[rec_cards["Status_Clean"] == "PENDENTE"]["Valor"].sum() if not rec_cards.empty else max(prev_rec - liq_rec, 0)
             
-            st.markdown("#### Lançamentos do período (Venda Bruta vs Líquido Bancário)")
-            st.caption("A API reflete o momento da venda. O extrato reflete o dinheiro líquido creditado no banco no dia.")
-            render_movement_cards(prev_rec, liq_rec, aberto_rec, "Receitas API", df_detail=rec_cards, state_prefix="fluxo_receitas")
+            st.markdown("#### Lançamentos do período")
+            render_movement_cards(prev_rec, liq_rec, aberto_rec, "Receitas", df_detail=rec_cards, state_prefix="fluxo_receitas")
             st.markdown("<br>", unsafe_allow_html=True)
             
             desp_cards = df_cards_api[(df_cards_api["Tipo_Movimento"] == "DESPESA") & (df_cards_api["Categoria_CFO"] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")]
             prev_cards = desp_cards["Valor"].sum() if not desp_cards.empty else 0.0
             liq_cards = desp_cards[desp_cards["Status_Clean"] == "REALIZADO"]["Valor"].sum() if not desp_cards.empty else 0.0
             aberto_cards = desp_cards[desp_cards["Status_Clean"] == "PENDENTE"]["Valor"].sum() if not desp_cards.empty else max(prev_cards - liq_cards, 0)
-            render_movement_cards(prev_cards, liq_cards, aberto_cards, "Despesas API", df_detail=desp_cards, state_prefix="fluxo_despesas")
+            
+            render_movement_cards(prev_cards, liq_cards, aberto_cards, "Despesas", df_detail=desp_cards, state_prefix="fluxo_despesas")
         else:
             entradas = df_cards["Total_Entradas"].sum() if not df_cards.empty else 0.0
             saidas = df_cards["Total_Saidas"].sum() if not df_cards.empty else 0.0
             st.markdown("#### Movimentação oficial do caixa")
-            render_movement_cards(entradas, entradas, 0.0, "Entradas Banco", df_detail=None, state_prefix="fluxo_oficial_ent")
+            render_movement_cards(entradas, entradas, 0.0, "Entradas", df_detail=None, state_prefix="fluxo_oficial_ent")
             st.markdown("<br>", unsafe_allow_html=True)
-            render_movement_cards(saidas, saidas, 0.0, "Saídas Banco", df_detail=None, state_prefix="fluxo_oficial_sai")
+            render_movement_cards(saidas, saidas, 0.0, "Saídas", df_detail=None, state_prefix="fluxo_oficial_sai")
+            st.caption("Para separar previsto, liquidado e em aberto, sincronize a API F360.")
+    else: st.info("👈 Anexe o 'Fluxo de Caixa.xlsx' para habilitar os indicadores do fluxo diário.")
 
     if oficial and not df_cards.empty:
-        st.markdown("<hr>", unsafe_allow_html=True)
-        st.markdown("#### Extrato Bancário Exato (F360)")
         dias_of = sorted(df_cards["Dia"].unique().tolist())
         linhas_of = [
             {"Linha de Extrato": "1. (+) Cartões", **dict(zip(df_cards["Dia"], df_cards.get("Cartoes", 0)))},
             {"Linha de Extrato": "2. (+) PIX / Boleto / Transferências", **dict(zip(df_cards["Dia"], df_cards.get("Boleto", 0) + df_cards.get("Outros_Recebimentos", 0)))},
             {"Linha de Extrato": "3. (+) Orçamento (Entrada Prevista)", **dict(zip(df_cards["Dia"], df_cards.get("Orcamento_Entrada", 0)))},
-            {"Linha de Extrato": "4. (=) Total de Entradas (Líquido)", **dict(zip(df_cards["Dia"], df_cards.get("Total_Entradas", 0)))},
-            {"Linha de Extrato": "5. (-) Total de Saídas (Real + Orç)", **dict(zip(df_cards["Dia"], df_cards.get("Total_Saidas", 0)))},
+            {"Linha de Extrato": "4. (=) Total de Entradas", **dict(zip(df_cards["Dia"], df_cards.get("Total_Entradas", 0)))},
+            {"Linha de Extrato": "5. (-) Total de Saídas (Real + Orçamento)", **dict(zip(df_cards["Dia"], df_cards.get("Total_Saidas", 0)))},
             {"Linha de Extrato": "6. 🏦 SALDO FINAL BANCÁRIO", **dict(zip(df_cards["Dia"], df_cards.get("Saldo", 0)))},
         ]
         df_display = pd.DataFrame(linhas_of)[["Linha de Extrato"] + dias_of]
@@ -637,13 +738,13 @@ with tabs[1]:
             
         try:
             st.dataframe(df_display.style.apply(highlight_saldo, axis=1).format({d: format_currency for d in dias_of}), use_container_width=True, hide_index=True)
-        except:
+        except Exception:
             st.dataframe(df_display, use_container_width=True, hide_index=True)
 
 with tabs[2]:
-    st.subheader("DRE de Caixa — Visão Gerencial por Competência")
+    st.subheader("DRE de Caixa — Visão Gerencial por Plano de Contas")
     if not df_api.empty:
-        st.markdown("#### Lançamentos Brutos da DRE (API)")
+        st.markdown("#### Lançamentos da DRE")
         rec_prev_dre = df_rec_kpi["Valor"].sum() if not df_rec_kpi.empty else 0.0
         rec_liq_dre = df_rec_kpi[df_rec_kpi["Status_Clean"] == "REALIZADO"]["Valor"].sum() if not df_rec_kpi.empty else 0.0
         rec_aberto_dre = df_rec_kpi[df_rec_kpi["Status_Clean"] == "PENDENTE"]["Valor"].sum() if not df_rec_kpi.empty else max(rec_prev_dre - rec_liq_dre, 0)
@@ -651,10 +752,10 @@ with tabs[2]:
         desp_liq_dre = df_desp_kpi[df_desp_kpi["Status_Clean"] == "REALIZADO"]["Valor"].sum() if not df_desp_kpi.empty else 0.0
         desp_aberto_dre = df_desp_kpi[df_desp_kpi["Status_Clean"] == "PENDENTE"]["Valor"].sum() if not df_desp_kpi.empty else max(desp_prev_dre - desp_liq_dre, 0)
 
-        render_movement_cards(rec_prev_dre, rec_liq_dre, rec_aberto_dre, "Receitas Brutas", df_detail=df_rec_kpi, state_prefix="dre_receitas")
+        render_movement_cards(rec_prev_dre, rec_liq_dre, rec_aberto_dre, "Receitas", df_detail=df_rec_kpi, state_prefix="dre_receitas")
         st.markdown("<br>", unsafe_allow_html=True)
-        render_movement_cards(desp_prev_dre, desp_liq_dre, desp_aberto_dre, "Despesas Brutas", df_detail=df_desp_kpi, state_prefix="dre_despesas")
-        st.caption("A DRE é baseada em competência. Taxas de maquininha estão nas saídas operacionais.")
+        render_movement_cards(desp_prev_dre, desp_liq_dre, desp_aberto_dre, "Despesas", df_detail=df_desp_kpi, state_prefix="dre_despesas")
+        st.caption("Os cards usam os lançamentos da API F360 respeitando a conta/loja e o período selecionados.")
         st.markdown("<br>", unsafe_allow_html=True)
 
         dre_list = [{"Categoria CFO": "0. RECEITAS DE VENDAS", "Previsto (R$)": f"R$ {tot_rec_prev:,.2f}", "Realizado (R$)": f"R$ {tot_rec_real:,.2f}", "Variação (R$)": f"R$ {tot_rec_real - tot_rec_prev:,.2f}"}]
@@ -688,17 +789,19 @@ with tabs[2]:
             return styles
 
         try:
-            st.dataframe(pd.DataFrame(dre_list).style.apply(colorir_linha_dre, axis=1), use_container_width=True, hide_index=True)
-        except:
+            df_dre_formatado = pd.DataFrame(dre_list)
+            st.dataframe(df_dre_formatado.style.apply(colorir_linha_dre, axis=1), use_container_width=True, hide_index=True)
+        except Exception:
             st.dataframe(pd.DataFrame(dre_list), use_container_width=True)
     else: st.warning("Sincronize a API no menu lateral para visualizar o DRE.")
 
 with tabs[3]:
-    st.subheader("Comparativo Por Loja — Vendas e Despesas (API)")
+    st.subheader("Comparativo Por Loja — Vendas e Despesas")
     if not df_api.empty:
         df_filtered_loja = df_kpi.copy()
         tem_loja = "Empresa_Loja" in df_filtered_loja.columns and df_filtered_loja["Empresa_Loja"].replace("", np.nan).notna().any()
         dimensao = "Empresa_Loja" if tem_loja else "Empresa"
+        if not tem_loja: st.warning("Sem dado de loja de origem nos lançamentos carregados. Mostrando por conta bancária de liquidação.")
 
         df_desp_loja = df_filtered_loja[(df_filtered_loja["Tipo_Movimento"] == "DESPESA") & (df_filtered_loja["Categoria_CFO"] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")]
         df_rec_loja = df_filtered_loja[(df_filtered_loja["Tipo_Movimento"] == "RECEITA") & (df_filtered_loja["Categoria_CFO"] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")]
@@ -714,15 +817,15 @@ with tabs[3]:
             pivot_desp = df_desp_loja.pivot_table(index="Categoria_CFO", columns=dimensao, values="Valor", aggfunc="sum", fill_value=0)
             try:
                 st.dataframe(pivot_desp.style.format(formatar_tabela_loja_sem_zero), use_container_width=True)
-            except:
+            except Exception:
                 st.dataframe(pivot_desp, use_container_width=True)
 
         if not df_rec_loja.empty:
             st.markdown("**Resumo Operacional (Receita x Despesa)**")
-            resumo_rec = df_rec_loja.groupby(dimensao)["Valor"].sum().to_frame("Receita de Vendas Bruta")
-            resumo_desp = df_desp_loja.groupby(dimensao)["Valor"].sum().to_frame("Despesas Brutas") if not df_desp_loja.empty else pd.DataFrame()
+            resumo_rec = df_rec_loja.groupby(dimensao)["Valor"].sum().to_frame("Receita de Vendas")
+            resumo_desp = df_desp_loja.groupby(dimensao)["Valor"].sum().to_frame("Despesas") if not df_desp_loja.empty else pd.DataFrame()
             resumo = resumo_rec.join(resumo_desp, how="outer").fillna(0)
-            resumo["Resultado"] = resumo["Receita de Vendas Bruta"] - resumo.get("Despesas Brutas", 0)
+            resumo["Resultado (Receita - Despesa)"] = resumo["Receita de Vendas"] - resumo.get("Despesas", 0)
             
             def style_loja_resultado(val):
                 if isinstance(val, (int, float)):
@@ -731,8 +834,9 @@ with tabs[3]:
                 return ''
                 
             try:
-                st.dataframe(resumo.style.format(formatar_tabela_loja_sem_zero).map(style_loja_resultado, subset=["Resultado"]), use_container_width=True)
-            except:
+                st.dataframe(resumo.style.format(formatar_tabela_loja_sem_zero).map(style_loja_resultado, subset=["Resultado (Receita - Despesa)"]), use_container_width=True)
+            except Exception:
                 st.dataframe(resumo, use_container_width=True)
 
+        if df_desp_loja.empty and df_rec_loja.empty: st.info("Nenhum lançamento com loja identificada para comparar no período selecionado.")
     else: st.warning("Sincronize a API para gerar o comparativo entre as lojas.")
