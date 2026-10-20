@@ -58,7 +58,7 @@ def carregar_logo():
 LOGO_BASE64 = carregar_logo()
 
 # ============================================================
-# TELA DE LOGIN
+# TELA DE LOGIN E ESTADO DA SESSÃO
 # ============================================================
 try:
     LOGIN_USUARIO = st.secrets.get("APP_LOGIN", "financeiro")
@@ -68,6 +68,10 @@ except Exception:
 
 if "autenticado" not in st.session_state:
     st.session_state.autenticado = False
+
+# Criamos uma chave para forçar o uploader a reiniciar quando limpa a memória
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = 0
 
 if not st.session_state.autenticado:
     st.markdown("""
@@ -159,7 +163,7 @@ MAPA_CNPJ_LOJA = {
 }
 
 # ============================================================
-# FUNÇÕES E CACHE
+# FUNÇÕES E SISTEMA DE MEMÓRIA LOCAL
 # ============================================================
 if 'fluxo_oficial_cache' not in st.session_state:
     st.session_state.fluxo_oficial_cache = {}
@@ -409,14 +413,26 @@ with st.sidebar:
 
     st.divider()
     st.markdown("### 🏦 Dados oficiais do caixa")
-    file_fluxo_oficial = st.file_uploader("F360 > Fluxo de Caixa > Exportar", type=["xlsx"], accept_multiple_files=True)
-    file_tabela_csv = st.file_uploader("CSV Automático (opcional)", type=["csv"], key="tabela_csv") if HAS_DOM_PROCESSOR else None
+    # Usa a chave uploader_key para forçar a renderização limpa do file uploader
+    file_fluxo_oficial = st.file_uploader("F360 > Fluxo de Caixa > Exportar", type=["xlsx"], accept_multiple_files=True, key=f"fluxo_uploader_{st.session_state.uploader_key}")
+    file_tabela_csv = st.file_uploader("CSV Automático (opcional)", type=["csv"], key=f"csv_uploader_{st.session_state.uploader_key}") if HAS_DOM_PROCESSOR else None
     
     st.divider()
+    
+    # === BOTÃO DE LIMPEZA CIRÚRGICA ===
     if st.button("🧹 Limpar Memória", use_container_width=True):
         if os.path.exists(CACHE_API_FILE): os.remove(CACHE_API_FILE)
         if os.path.exists(CACHE_EXCEL_FILE): os.remove(CACHE_EXCEL_FILE)
-        st.session_state.clear()
+        
+        # Preserva o login e a chave de upload, deleta todo o resto
+        chaves_para_manter = ["autenticado", "uploader_key"]
+        for chave in list(st.session_state.keys()):
+            if chave not in chaves_para_manter:
+                del st.session_state[chave]
+                
+        # Muda a chave do uploader para forçar ele a limpar o arquivo visualmente e da memória
+        st.session_state.uploader_key += 1
+        
         st.rerun()
 
     st.caption("🔐 A fonte oficial do saldo bancário continua sendo o export do Fluxo de Caixa do F360. Os dados ficam salvos até que clique em Limpar Memória.")
@@ -499,7 +515,6 @@ if oficial:
         saidas_oficiais = df_of_exec["Total_Saidas"].sum()
         saldo_final_exec = df_of_exec.iloc[-1]["Saldo"]
         
-        # Injeção das despesas de cartão/iFood retidas
         if not df_kpi.empty:
             despesas_api_temp = df_kpi[(df_kpi['Tipo_Movimento'] == 'DESPESA') & (df_kpi['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")]
             ajustes = []
@@ -536,7 +551,6 @@ tot_prev = df_desp_kpi['Valor'].sum() if not df_desp_kpi.empty else 0.0
 tot_real = df_desp_kpi[df_desp_kpi['Status_Clean'] == 'REALIZADO']['Valor'].sum() if not df_desp_kpi.empty else 0.0
 tot_pend = df_desp_kpi[df_desp_kpi['Status_Clean'] == 'PENDENTE']['Valor'].sum() if not df_desp_kpi.empty else 0.0
 
-# --- PROTEÇÃO 3 BLINDADA DUPLA: SINCRONIZA SAÍDAS E ENTRADAS COM A API E RECALCULA O SALDO ---
 if not df_of_exec.empty and not df_kpi.empty:
     df_of_exec = df_of_exec.sort_values("Data")
     primeiro_idx = df_of_exec.index[0]
@@ -558,14 +572,12 @@ if not df_of_exec.empty and not df_kpi.empty:
             if api_rec > df_of_exec.loc[i, "Total_Entradas"]:
                 df_of_exec.loc[i, "Total_Entradas"] = api_rec
                 
-                # Se as entradas subirem para nivelar à API, atualiza a linha de cartões do extrato visual
                 d_str = df_of_exec.loc[i, "Dia"] if "Dia" in df_of_exec.columns else None
                 if d_str and "Cartoes" in df_of_exec.columns:
                     diff_rec = api_rec - df_of_exec.loc[i, "Total_Entradas"]
                     df_of_exec.loc[i, "Cartoes"] += diff_rec
                 modificado = True
     
-    # Reconstrói o acumulado diário do Saldo em caso de modificação da API
     if modificado:
         saldo_acumulado = saldo_base
         for i in df_of_exec.index:
@@ -805,7 +817,7 @@ with tabs[2]:
         rec_aberto_dre = df_rec_kpi[df_rec_kpi["Status_Clean"] == "PENDENTE"]["Valor"].sum() if not df_rec_kpi.empty else max(rec_prev_dre - rec_liq_dre, 0)
         desp_prev_dre = df_desp_kpi["Valor"].sum() if not df_desp_kpi.empty else 0.0
         desp_liq_dre = df_desp_kpi[df_desp_kpi["Status_Clean"] == "REALIZADO"]["Valor"].sum() if not df_desp_kpi.empty else 0.0
-        desp_aberto_dre = df_desp_kpi[df_desp_kpi["Status_Clean"] == "PENDENTE"]["Valor"].sum() if not desp_prev_dre - desp_liq_dre else max(desp_prev_dre - desp_liq_dre, 0)
+        desp_aberto_dre = df_desp_kpi[df_desp_kpi["Status_Clean"] == "PENDENTE"]["Valor"].sum() if not df_desp_kpi.empty else max(desp_prev_dre - desp_liq_dre, 0)
 
         render_movement_cards(rec_prev_dre, rec_liq_dre, rec_aberto_dre, "Receitas", df_detail=df_rec_kpi, state_prefix="dre_receitas")
         st.markdown("<br>", unsafe_allow_html=True)
