@@ -72,7 +72,6 @@ except Exception:
 if "autenticado" not in st.session_state:
     st.session_state.autenticado = False
 
-# Criamos uma chave para forçar o uploader a reiniciar quando limpa a memória
 if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
 
@@ -416,13 +415,12 @@ with st.sidebar:
 
     st.divider()
     st.markdown("### 🏦 Dados oficiais do caixa")
-    # AQUI ESTÃO AS KEYS DINÂMICAS PARA LIMPAR O UPLOADER
     file_fluxo_oficial = st.file_uploader("F360 > Fluxo de Caixa > Exportar", type=["xlsx"], accept_multiple_files=True, key=f"fluxo_uploader_{st.session_state.uploader_key}")
     file_tabela_csv = st.file_uploader("CSV Automático (opcional)", type=["csv"], key=f"csv_uploader_{st.session_state.uploader_key}") if HAS_DOM_PROCESSOR else None
     
     st.divider()
     
-    # AQUI ESTÁ A LIMPEZA CIRÚRGICA QUE PRESERVA O LOGIN
+    # === AQUI ESTÁ A CORREÇÃO DA LIMPEZA CIRÚRGICA QUE FORÇA O STREAMLIT A ESQUECER OS ARQUIVOS ===
     if st.button("🧹 Limpar Memória", use_container_width=True):
         if os.path.exists(CACHE_API_FILE): os.remove(CACHE_API_FILE)
         if os.path.exists(CACHE_EXCEL_FILE): os.remove(CACHE_EXCEL_FILE)
@@ -433,6 +431,7 @@ with st.sidebar:
                 del st.session_state[chave]
                 
         st.session_state.uploader_key += 1
+        st.cache_data.clear() # Limpa a memória profunda de 1 hora do cache
         st.rerun()
 
     st.caption("🔐 A fonte oficial do saldo bancário continua sendo o export do Fluxo de Caixa do F360. Os dados ficam salvos até que clique em Limpar Memória.")
@@ -505,10 +504,7 @@ if not df_kpi.empty:
 oficial = fluxo_oficial.get(conta_selecionada) or fluxo_oficial.get("Ver Todas as Contas") or fluxo_oficial.get("CSV (via navegador)")
 if not oficial and len(fluxo_oficial) == 1: oficial = list(fluxo_oficial.values())[0]
 
-df_of_exec = pd.DataFrame()
-saldo_final_exec = None
-entradas_oficiais = None
-saidas_oficiais = None
+df_of_exec, saldo_final_exec, entradas_oficiais, saidas_oficiais = pd.DataFrame(), None, None, None
 saldo_atual_disponivel = None
 
 if oficial:
@@ -606,15 +602,13 @@ tabs = st.tabs(["📊 Visão Executiva", "📅 Fluxo Diário", "📋 DRE de Caix
 
 with tabs[0]:
     st.markdown('<div class="section-title">Resumo financeiro do período</div>', unsafe_allow_html=True)
-    
-    # === AQUI ESTÃO OS 6 CARDS DO TOPO ===
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     with c1: st.markdown(f'<div class="kpi-card"><div class="kpi-label">💰 Entradas Reais</div><div class="kpi-value kpi-green">{brl(entradas_exec)}</div><div class="kpi-foot">Dinheiro liquidado no banco</div></div>', unsafe_allow_html=True)
     with c2: st.markdown(f'<div class="kpi-card"><div class="kpi-label">🔴 Saídas</div><div class="kpi-value kpi-red">{brl(saidas_exec)}</div><div class="kpi-foot">Caixa Pago + Pendente da API</div></div>', unsafe_allow_html=True)
     with c3: st.markdown(f'<div class="kpi-card"><div class="kpi-label">📈 Resultado</div><div class="kpi-value {"kpi-green" if resultado_exec >= 0 else "kpi-red"}">{brl(resultado_exec)}</div><div class="kpi-foot">Entradas − saídas do período</div></div>', unsafe_allow_html=True)
-    with c4: st.markdown(f'<div class="kpi-card"><div class="kpi-label">💲 Saldo Atual (Hoje)</div><div class="kpi-value {"kpi-green" if (saldo_atual_disponivel or 0) >= 0 else "kpi-red"}">{brl(saldo_atual_disponivel) if saldo_atual_disponivel is not None else "—"}</div><div class="kpi-foot">{"Projeção: " + brl(saldo_final_exec) if saldo_final_exec is not None else "Projeção não disponível"}</div></div>', unsafe_allow_html=True)
-    with c5: st.markdown(f'<div class="kpi-card"><div class="kpi-label">⚠️ Em Aberto</div><div class="kpi-value {"kpi-green" if tot_pend == 0 else "kpi-yellow"}">{brl(tot_pend)}</div><div class="kpi-foot">{"Nenhuma despesa pendente" if tot_pend == 0 else "Despesas pendentes na API"}</div></div>', unsafe_allow_html=True)
-    with c6: st.markdown(f'<div class="kpi-card"><div class="kpi-label">🏦 Saldo Final</div><div class="kpi-value {"kpi-green" if (saldo_final_exec or 0) >= 0 else "kpi-red"}">{brl(saldo_final_exec) if saldo_final_exec is not None else "—"}</div><div class="kpi-foot">Saldo do export oficial F360</div></div>', unsafe_allow_html=True)
+    with c4: st.markdown(f'<div class="kpi-card"><div class="kpi-label">💲 Saldo Atual (Hoje)</div><div class="kpi-value {"kpi-green" if (saldo_atual_disponivel or 0) >= 0 else "kpi-red"}">{brl(saldo_atual_disponivel) if saldo_atual_disponivel is not None else "—"}</div><div class="kpi-foot">Saldo anterior + Entradas</div></div>', unsafe_allow_html=True)
+    with c5: st.markdown(f'<div class="kpi-card"><div class="kpi-label">🏦 Saldo Final</div><div class="kpi-value {"kpi-green" if (saldo_final_exec or 0) >= 0 else "kpi-red"}">{brl(saldo_final_exec) if saldo_final_exec is not None else "—"}</div><div class="kpi-foot">Saldo do export oficial F360</div></div>', unsafe_allow_html=True)
+    with c6: st.markdown(f'<div class="kpi-card"><div class="kpi-label">⚠️ Em Aberto</div><div class="kpi-value {"kpi-green" if tot_pend == 0 else "kpi-yellow"}">{brl(tot_pend)}</div><div class="kpi-foot">{"Nenhuma despesa pendente" if tot_pend == 0 else "Despesas pendentes na API"}</div></div>', unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
     if saldo_final_exec is not None and saldo_final_exec < 0: st.markdown('<div class="alert-danger">🔴 Atenção: o saldo final do período está negativo.</div>', unsafe_allow_html=True)
