@@ -29,26 +29,28 @@ st.set_page_config(
 )
 
 # ============================================================
-# FUNÇÃO BLINDADA PARA CARREGAR A LOGO LOCAL
+# FUNÇÃO BLINDADA PARA CARREGAR A LOGO LOCAL (COM CAMINHO ABSOLUTO)
 # ============================================================
+@st.cache_data
 def carregar_logo():
-    # Tenta lidar com extensões duplas do Windows e espaços extra
     nomes_tentativas = ["logo_borelli.png", "logo_borelli.png.png", "logo_borelli"]
     
     pastas_para_tentar = [
         ".", 
         os.path.dirname(os.path.abspath(__file__)),
-        os.getcwd()
+        os.getcwd(),
+        r"C:\Users\USUARIO\OneDrive\Área de Trabalho\fluxo-caixa-cfo"
     ]
 
     for pasta in set(pastas_para_tentar):
         try:
-            arquivos_na_pasta = os.listdir(pasta)
-            for arquivo in arquivos_na_pasta:
-                if arquivo.lower().strip() in nomes_tentativas:
-                    caminho_completo = os.path.join(pasta, arquivo)
-                    with open(caminho_completo, "rb") as f:
-                        return base64.b64encode(f.read()).decode()
+            if os.path.exists(pasta):
+                arquivos_na_pasta = os.listdir(pasta)
+                for arquivo in arquivos_na_pasta:
+                    if arquivo.lower().strip() in nomes_tentativas:
+                        caminho_completo = os.path.join(pasta, arquivo)
+                        with open(caminho_completo, "rb") as f:
+                            return base64.b64encode(f.read()).decode()
         except Exception:
             continue
     return None
@@ -56,7 +58,7 @@ def carregar_logo():
 LOGO_BASE64 = carregar_logo()
 
 if LOGO_BASE64 is None:
-    st.toast("⚠️ Imagem da logo não encontrada. Verifique se o nome não tem espaços extra.", icon="⚠️")
+    st.toast("⚠️ Imagem da logo não encontrada nem no caminho absoluto do OneDrive.", icon="⚠️")
 
 # ============================================================
 # TELA DE LOGIN (gate simples antes de mostrar qualquer dado)
@@ -500,6 +502,7 @@ if oficial:
         saidas_oficiais = df_of_exec["Total_Saidas"].sum()
         saldo_final_exec = df_of_exec.iloc[-1]["Saldo"]
         
+        # Injeção automática das taxas
         if not df_kpi.empty:
             despesas_api_temp = df_kpi[(df_kpi['Tipo_Movimento'] == 'DESPESA') & (df_kpi['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")]
             ajustes = []
@@ -536,7 +539,15 @@ tot_prev = df_desp_kpi['Valor'].sum() if not df_desp_kpi.empty else 0.0
 tot_real = df_desp_kpi[df_desp_kpi['Status_Clean'] == 'REALIZADO']['Valor'].sum() if not df_desp_kpi.empty else 0.0
 tot_pend = df_desp_kpi[df_desp_kpi['Status_Clean'] == 'PENDENTE']['Valor'].sum() if not df_desp_kpi.empty else 0.0
 
+# --- PROTEÇÃO 3 BLINDADA: SINCRONIZAR EXCEL E RECALCULAR O SALDO ---
 if not df_of_exec.empty and not df_kpi.empty:
+    df_of_exec = df_of_exec.sort_values("Data")
+    primeiro_idx = df_of_exec.index[0]
+    
+    # Captura o saldo base (fecho do dia anterior) antes de qualquer injeção da API
+    saldo_base = df_of_exec.loc[primeiro_idx, "Saldo"] - df_of_exec.loc[primeiro_idx, "Total_Entradas"] + df_of_exec.loc[primeiro_idx, "Total_Saidas"]
+    modificado = False
+    
     for d in df_of_exec["Data"].dropna().unique():
         d_date = pd.to_datetime(d).date()
         api_desp = df_desp_kpi[df_desp_kpi["Vencimento_dt"].dt.date == d_date]["Valor"].sum()
@@ -544,13 +555,24 @@ if not df_of_exec.empty and not df_kpi.empty:
         
         idx = df_of_exec.index[df_of_exec["Data"].dt.date == d_date]
         if not idx.empty:
-            if api_desp > df_of_exec.loc[idx[0], "Total_Saidas"]:
-                df_of_exec.loc[idx[0], "Total_Saidas"] = api_desp
-            if api_rec > df_of_exec.loc[idx[0], "Total_Entradas"]:
-                df_of_exec.loc[idx[0], "Total_Entradas"] = api_rec
+            i = idx[0]
+            if api_desp > df_of_exec.loc[i, "Total_Saidas"]:
+                df_of_exec.loc[i, "Total_Saidas"] = api_desp
+                modificado = True
+            if api_rec > df_of_exec.loc[i, "Total_Entradas"]:
+                df_of_exec.loc[i, "Total_Entradas"] = api_rec
+                modificado = True
     
+    # Se alguma coluna subiu para igualar à API, reconstrói o acumulado matemático até ao fim do mês
+    if modificado:
+        saldo_acumulado = saldo_base
+        for i in df_of_exec.index:
+            saldo_acumulado += df_of_exec.loc[i, "Total_Entradas"] - df_of_exec.loc[i, "Total_Saidas"]
+            df_of_exec.loc[i, "Saldo"] = saldo_acumulado
+            
     entradas_oficiais = df_of_exec["Total_Entradas"].sum()
     saidas_oficiais = df_of_exec["Total_Saidas"].sum()
+    saldo_final_exec = df_of_exec.iloc[-1]["Saldo"]
 
 entradas_exec = max((entradas_oficiais or 0), tot_rec_prev)
 saidas_exec = max((saidas_oficiais or 0), tot_prev)
@@ -721,8 +743,8 @@ with tabs[0]:
 
 with tabs[1]:
     if oficial:
-        df_cards = oficial["df"].copy()
-        if isinstance(date_range, tuple) and len(date_range) == 2: df_cards = df_cards[(df_cards["Data"].dt.date >= date_range[0]) & (df_cards["Data"].dt.date <= date_range[1])]
+        # AQUI USAMOS O DF_OF_EXEC QUE JÁ FOI CORRIGIDO NA PROTEÇÃO 3 ACIMA
+        df_cards = df_of_exec.copy()
 
         if not df_api.empty:
             df_cards_api = df_kpi.copy()
