@@ -29,7 +29,7 @@ st.set_page_config(
 )
 
 # ============================================================
-# FUNÇÃO BLINDADA PARA CARREGAR A LOGO LOCAL (COM CAMINHO ABSOLUTO)
+# FUNÇÃO BLINDADA PARA CARREGAR A LOGO LOCAL
 # ============================================================
 @st.cache_data
 def carregar_logo():
@@ -57,11 +57,8 @@ def carregar_logo():
 
 LOGO_BASE64 = carregar_logo()
 
-if LOGO_BASE64 is None:
-    st.toast("⚠️ Imagem da logo não encontrada nem no caminho absoluto do OneDrive.", icon="⚠️")
-
 # ============================================================
-# TELA DE LOGIN (gate simples antes de mostrar qualquer dado)
+# TELA DE LOGIN
 # ============================================================
 try:
     LOGIN_USUARIO = st.secrets.get("APP_LOGIN", "financeiro")
@@ -162,7 +159,7 @@ MAPA_CNPJ_LOJA = {
 }
 
 # ============================================================
-# FUNÇÕES E SISTEMA DE MEMÓRIA LOCAL
+# FUNÇÕES E CACHE
 # ============================================================
 if 'fluxo_oficial_cache' not in st.session_state:
     st.session_state.fluxo_oficial_cache = {}
@@ -502,7 +499,7 @@ if oficial:
         saidas_oficiais = df_of_exec["Total_Saidas"].sum()
         saldo_final_exec = df_of_exec.iloc[-1]["Saldo"]
         
-        # Injeção automática das taxas
+        # Injeção das despesas de cartão/iFood retidas
         if not df_kpi.empty:
             despesas_api_temp = df_kpi[(df_kpi['Tipo_Movimento'] == 'DESPESA') & (df_kpi['Categoria_CFO'] != "7. TRANSFERÊNCIAS INTERCOMPANY / MÚTUO")]
             ajustes = []
@@ -539,12 +536,11 @@ tot_prev = df_desp_kpi['Valor'].sum() if not df_desp_kpi.empty else 0.0
 tot_real = df_desp_kpi[df_desp_kpi['Status_Clean'] == 'REALIZADO']['Valor'].sum() if not df_desp_kpi.empty else 0.0
 tot_pend = df_desp_kpi[df_desp_kpi['Status_Clean'] == 'PENDENTE']['Valor'].sum() if not df_desp_kpi.empty else 0.0
 
-# --- PROTEÇÃO 3 BLINDADA: SINCRONIZAR EXCEL E RECALCULAR O SALDO ---
+# --- PROTEÇÃO 3 BLINDADA DUPLA: SINCRONIZA SAÍDAS E ENTRADAS COM A API E RECALCULA O SALDO ---
 if not df_of_exec.empty and not df_kpi.empty:
     df_of_exec = df_of_exec.sort_values("Data")
     primeiro_idx = df_of_exec.index[0]
     
-    # Captura o saldo base (fecho do dia anterior) antes de qualquer injeção da API
     saldo_base = df_of_exec.loc[primeiro_idx, "Saldo"] - df_of_exec.loc[primeiro_idx, "Total_Entradas"] + df_of_exec.loc[primeiro_idx, "Total_Saidas"]
     modificado = False
     
@@ -561,9 +557,15 @@ if not df_of_exec.empty and not df_kpi.empty:
                 modificado = True
             if api_rec > df_of_exec.loc[i, "Total_Entradas"]:
                 df_of_exec.loc[i, "Total_Entradas"] = api_rec
+                
+                # Se as entradas subirem para nivelar à API, atualiza a linha de cartões do extrato visual
+                d_str = df_of_exec.loc[i, "Dia"] if "Dia" in df_of_exec.columns else None
+                if d_str and "Cartoes" in df_of_exec.columns:
+                    diff_rec = api_rec - df_of_exec.loc[i, "Total_Entradas"]
+                    df_of_exec.loc[i, "Cartoes"] += diff_rec
                 modificado = True
     
-    # Se alguma coluna subiu para igualar à API, reconstrói o acumulado matemático até ao fim do mês
+    # Reconstrói o acumulado diário do Saldo em caso de modificação da API
     if modificado:
         saldo_acumulado = saldo_base
         for i in df_of_exec.index:
@@ -743,7 +745,6 @@ with tabs[0]:
 
 with tabs[1]:
     if oficial:
-        # AQUI USAMOS O DF_OF_EXEC QUE JÁ FOI CORRIGIDO NA PROTEÇÃO 3 ACIMA
         df_cards = df_of_exec.copy()
 
         if not df_api.empty:
@@ -804,7 +805,7 @@ with tabs[2]:
         rec_aberto_dre = df_rec_kpi[df_rec_kpi["Status_Clean"] == "PENDENTE"]["Valor"].sum() if not df_rec_kpi.empty else max(rec_prev_dre - rec_liq_dre, 0)
         desp_prev_dre = df_desp_kpi["Valor"].sum() if not df_desp_kpi.empty else 0.0
         desp_liq_dre = df_desp_kpi[df_desp_kpi["Status_Clean"] == "REALIZADO"]["Valor"].sum() if not df_desp_kpi.empty else 0.0
-        desp_aberto_dre = df_desp_kpi[df_desp_kpi["Status_Clean"] == "PENDENTE"]["Valor"].sum() if not df_desp_kpi.empty else max(desp_prev_dre - desp_liq_dre, 0)
+        desp_aberto_dre = df_desp_kpi[df_desp_kpi["Status_Clean"] == "PENDENTE"]["Valor"].sum() if not desp_prev_dre - desp_liq_dre else max(desp_prev_dre - desp_liq_dre, 0)
 
         render_movement_cards(rec_prev_dre, rec_liq_dre, rec_aberto_dre, "Receitas", df_detail=df_rec_kpi, state_prefix="dre_receitas")
         st.markdown("<br>", unsafe_allow_html=True)
