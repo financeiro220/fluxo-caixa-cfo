@@ -6,6 +6,7 @@ import os
 import pickle
 import re
 import base64
+import requests
 from datetime import datetime, date, timedelta
 
 # IMPORTAÇÃO DO MÓDULO F360
@@ -60,7 +61,7 @@ def carregar_logo():
 LOGO_BASE64 = carregar_logo()
 
 # ============================================================
-# TELA DE LOGIN
+# TELA DE LOGIN DO DASHBOARD
 # ============================================================
 try:
     LOGIN_USUARIO = st.secrets.get("APP_LOGIN", "financeiro")
@@ -295,6 +296,20 @@ def render_movement_cards(previsto, liquidado, aberto, titulo="Lançamentos", df
                 st.dataframe(df_show, use_container_width=True, hide_index=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
+# FUNÇÃO DE AUTENTICAÇÃO INCICLE
+def autenticar_incicle(email, senha):
+    url = "https://schedule.backend.incicle.com/api/auth/authenticate"
+    payload = {"email": email, "password": senha}
+    try:
+        resp = requests.post(url, json=payload, timeout=10)
+        if resp.status_code == 200:
+            dados = resp.json()
+            return dados.get("access_token")
+        else:
+            return None
+    except Exception as e:
+        return None
+
 # ============================================================
 # MENU LATERAL - SELETOR DE MÓDULOS
 # ============================================================
@@ -312,7 +327,7 @@ with st.sidebar:
     st.divider()
 
 # ============================================================
-# MÓDULO 1: FINANCEIRO (F360) - CÓDIGO ORIGINAL INTACTO
+# MÓDULO 1: FINANCEIRO (F360)
 # ============================================================
 if st.session_state.modulo_ativo == "Financeiro (F360)":
     try:
@@ -773,7 +788,7 @@ if st.session_state.modulo_ativo == "Financeiro (F360)":
         else: st.warning("Sincronize a API para gerar o comparativo entre as lojas.")
 
 # ============================================================
-# MÓDULO 2: RECURSOS HUMANOS (InCicle API) - NOVO!
+# MÓDULO 2: RECURSOS HUMANOS (InCicle API)
 # ============================================================
 elif st.session_state.modulo_ativo == "Recursos Humanos (InCicle)":
     
@@ -787,13 +802,20 @@ elif st.session_state.modulo_ativo == "Recursos Humanos (InCicle)":
     
     with st.sidebar:
         st.markdown("### 🔑 Conexão InCicle")
-        st.text_input("API Token (JWT)", type="password", placeholder="Coloque o token InCicle...")
+        email_incicle = st.text_input("E-mail InCicle", value="willian.oliveira2121@hotmail.com")
+        senha_incicle = st.text_input("Senha InCicle", type="password", value="12345678")
+        
         if st.button("Sincronizar Estrutura & Custos", use_container_width=True):
-            with st.spinner("A carregar orçamentos e colaboradores (Core HR)..."):
-                import time
-                time.sleep(1.5)
-                st.session_state.rh_sync = True
-                st.success("API InCicle (Core2) lida com sucesso.")
+            with st.spinner("Autenticando na InCicle..."):
+                token = autenticar_incicle(email_incicle, senha_incicle)
+                if token:
+                    st.session_state.incicle_token = token
+                    st.session_state.rh_sync = True
+                    st.success("Autenticação InCicle realizada com sucesso!")
+                else:
+                    st.session_state.rh_sync = True # Mantemos True por agora apenas para continuar a ver os dados base no ecrã de simulação caso a API bloqueie testes.
+                    st.warning("Falha na API real, a usar Sandbox de demonstração.")
+                    
         st.divider()
         st.caption("A API de Controle de Ponto (Timesheets) ainda não foi fornecida pela InCicle. O módulo atual usa os dados de Organograma e Custos (`org-layers.yaml`, `budgets.yaml`, `collaborators.yaml`).")
 
