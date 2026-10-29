@@ -1185,66 +1185,107 @@ elif st.session_state.modulo_ativo == "Recursos Humanos (InCicle)":
     
     header_html = """
     <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:20px; margin-bottom: 20px;">
-        <div><div class="hero-title">Recursos Humanos</div><div class="hero-subtitle">Controlo de Custos e Estrutura</div></div>
-        <div class="status-pill blue"><span class="status-dot blue"></span>InCicle API Sandbox</div>
+        <div><div class="hero-title">Recursos Humanos</div><div class="hero-subtitle">Organograma e Estrutura (Dados Reais)</div></div>
+        <div class="status-pill blue"><span class="status-dot blue"></span>InCicle API Conectada</div>
     </div>
     """
     st.markdown(header_html, unsafe_allow_html=True)
     
+    # Função auxiliar para ler o Company ID do token no Streamlit
+    def decode_jwt_payload_app(token):
+        try:
+            payload = token.split(".")[1]
+            padded = payload + "=" * (4 - len(payload) % 4)
+            decoded = base64.b64decode(padded).decode("utf-8")
+            return json.loads(decoded)
+        except Exception:
+            return {}
+    
     with st.sidebar:
         st.markdown("### 🔑 Conexão InCicle")
-        email_incicle = st.text_input("E-mail InCicle", value="willian.oliveira2121@hotmail.com")
-        senha_incicle = st.text_input("Senha InCicle", type="password", value="12345678")
+        email_incicle = st.text_input("E-mail InCicle", value="rh@taldivoeferreira.com.br")
+        senha_incicle = st.text_input("Senha InCicle", type="password", value="020281ia")
         
-        if st.button("Sincronizar Estrutura & Custos", use_container_width=True):
-            with st.spinner("Autenticando na InCicle..."):
+        if st.button("🚀 Sincronizar Estrutura", use_container_width=True):
+            with st.spinner("A extrair dados reais da InCicle..."):
                 token = autenticar_incicle(email_incicle, senha_incicle)
                 if token:
                     st.session_state.incicle_token = token
                     st.session_state.rh_sync = True
-                    st.success("Autenticação InCicle realizada com sucesso!")
+                    
+                    payload = decode_jwt_payload_app(token)
+                    company_id = payload.get("company_id") or payload.get("companyId")
+                    if not company_id and "user" in payload and "config" in payload["user"]:
+                        company_id = payload["user"]["config"].get("default_company_id")
+                        
+                    headers = {
+                        "Authorization": f"Bearer {token}",
+                        "companyId": str(company_id)
+                    }
+                    
+                    # 1. Contagem Geral (Core API)
+                    r_count = requests.get("https://core.backend.incicle.com/api/v1/engineering/collaborators/count", headers=headers)
+                    if r_count.status_code == 200: st.session_state.rh_count = r_count.json()
+                    
+                    # 2. Lojas/Unidades (Engineering API)
+                    r_units = requests.get("https://engineering.backend.incicle.com/engineering/units", headers=headers)
+                    if r_units.status_code == 200: st.session_state.rh_lojas = r_units.json().get("data", [])
+                        
+                    # 3. Pessoas e Cargos (Engineering API)
+                    r_people = requests.get("https://engineering.backend.incicle.com/engineering/people?per_page=150", headers=headers)
+                    if r_people.status_code == 200: st.session_state.rh_pessoas = r_people.json().get("data", [])
+                        
+                    st.success("✅ Organograma sincronizado com sucesso!")
                 else:
-                    st.session_state.rh_sync = True
-                    st.warning("Falha na API real, a usar Sandbox de demonstração.")
+                    st.error("❌ Falha na autenticação. Verifique as credenciais.")
                     
         st.divider()
-        st.caption("A API de Controle de Ponto (Timesheets) ainda não foi fornecida pela InCicle. O módulo atual usa os dados de Organograma e Custos (`org-layers.yaml`, `budgets.yaml`, `collaborators.yaml`).")
+        st.caption("A extração de Custos da Folha e Controle de Ponto (Timesheets) aguarda a libertação das respetivas rotas pela InCicle.")
 
     if st.session_state.get("rh_sync", False):
-        st.markdown('<div class="section-title">Monitor de Orçamento da Folha (Outubro 2026)</div>', unsafe_allow_html=True)
+        count_dados = st.session_state.get("rh_count", {})
+        pessoas = st.session_state.get("rh_pessoas", [])
+        lojas = st.session_state.get("rh_lojas", [])
+        
+        ativos = count_dados.get("linked", 0)
+        inativos = count_dados.get("unlinked", 0)
+        
+        st.markdown('<div class="section-title">Monitor de Estrutura e Headcount</div>', unsafe_allow_html=True)
         
         c1, c2, c3, c4 = st.columns(4)
-        with c1: st.markdown(f'<div class="kpi-card"><div class="kpi-label">💰 Orçamento Total (Budget)</div><div class="kpi-value kpi-blue">{brl(210000)}</div><div class="kpi-foot">Limite definido no InCicle</div></div>', unsafe_allow_html=True)
-        with c2: st.markdown(f'<div class="kpi-card"><div class="kpi-label">🔴 Custo Real (Consumido)</div><div class="kpi-value kpi-red">{brl(198500)}</div><div class="kpi-foot">Salários + Encargos ativos</div></div>', unsafe_allow_html=True)
-        with c3: st.markdown(f'<div class="kpi-card"><div class="kpi-label">⚖️ Variação / Margem</div><div class="kpi-value kpi-green">{brl(11500)}</div><div class="kpi-foot">Orçamento restante</div></div>', unsafe_allow_html=True)
-        with c4: st.markdown(f'<div class="kpi-card"><div class="kpi-label">👥 Headcount Ativo</div><div class="kpi-value kpi-blue">42</div><div class="kpi-foot">Colaboradores vinculados</div></div>', unsafe_allow_html=True)
+        with c1: st.markdown(f'<div class="kpi-card"><div class="kpi-label">👥 Headcount Ativo</div><div class="kpi-value kpi-blue">{ativos}</div><div class="kpi-foot">Colaboradores vinculados</div></div>', unsafe_allow_html=True)
+        with c2: st.markdown(f'<div class="kpi-card"><div class="kpi-label">⚪ Não Vinculados</div><div class="kpi-value kpi-yellow">{inativos}</div><div class="kpi-foot">Registos inativos/desligados</div></div>', unsafe_allow_html=True)
+        with c3: st.markdown(f'<div class="kpi-card"><div class="kpi-label">🏪 Lojas/Unidades</div><div class="kpi-value kpi-green">{len(lojas)}</div><div class="kpi-foot">Unidades de negócio ativas</div></div>', unsafe_allow_html=True)
+        with c4: st.markdown(f'<div class="kpi-card"><div class="kpi-label">⚠️ Ponto / Custos</div><div class="kpi-value kpi-red">Pendente</div><div class="kpi-foot">Aguardando API Timesheets</div></div>', unsafe_allow_html=True)
 
-        st.markdown("<br>### Análise de Custo por Loja", unsafe_allow_html=True)
+        st.markdown("<br>### Distribuição de Colaboradores por Loja", unsafe_allow_html=True)
         
-        dados_lojas = pd.DataFrame([
-            {"Loja": "17 Pantanal Itaú", "Orçamento": 55000, "Custo Real": 52300, "Headcount": 12},
-            {"Loja": "51 Estação Itaú", "Orçamento": 48000, "Custo Real": 49100, "Headcount": 10},
-            {"Loja": "61 Itaú Goiabeiras", "Orçamento": 62000, "Custo Real": 58000, "Headcount": 14},
-            {"Loja": "36 MJL", "Orçamento": 45000, "Custo Real": 39100, "Headcount": 6}
-        ])
-        dados_lojas["Status"] = np.where(dados_lojas["Custo Real"] > dados_lojas["Orçamento"], "🔴 Estourou", "🟢 Dentro da margem")
-        
-        def formata_rh(val):
-            if isinstance(val, (int, float)): return brl(val)
-            return val
+        if pessoas:
+            df_pessoas = pd.DataFrame(pessoas)
             
-        st.dataframe(dados_lojas.style.format({"Orçamento": formata_rh, "Custo Real": formata_rh}), use_container_width=True, hide_index=True)
-        
-        st.markdown("<br>### Composição da Folha (Costs API)", unsafe_allow_html=True)
-        comp_rh = pd.DataFrame({
-            "Componente": ["Salários Base (CLT)", "Benefícios (VR/VT/Saúde)", "Impostos e Provisões", "Prestadores (PJ)"],
-            "Custo Total": [115000, 32000, 41500, 10000]
-        })
-        
-        base_rh = alt.Chart(comp_rh).encode(
-            x=alt.X("Custo Total:Q", title=""),
-            y=alt.Y("Componente:N", sort="-x", title="")
-        ).mark_bar(color="#69B7FF", cornerRadiusEnd=3)
-        st.altair_chart(base_rh.properties(height=200), use_container_width=True)
+            if "unit_name" not in df_pessoas.columns: df_pessoas["unit_name"] = "Sem loja vinculada"
+            else: df_pessoas["unit_name"] = df_pessoas["unit_name"].fillna("Sem loja vinculada")
+                
+            if "job_title" not in df_pessoas.columns: df_pessoas["job_title"] = "Sem cargo"
+                
+            df_lojas = df_pessoas.groupby("unit_name").size().reset_index(name="Headcount")
+            df_lojas = df_lojas.rename(columns={"unit_name": "Loja / Unidade"}).sort_values("Headcount", ascending=False)
+            
+            col_t, col_g = st.columns([1, 1])
+            with col_t:
+                st.dataframe(df_lojas, use_container_width=True, hide_index=True)
+            with col_g:
+                grafico = alt.Chart(df_lojas).encode(
+                    x=alt.X("Headcount:Q", title=""),
+                    y=alt.Y("Loja / Unidade:N", sort="-x", title="")
+                ).mark_bar(color="#69B7FF", cornerRadiusEnd=3)
+                st.altair_chart(grafico.properties(height=250), use_container_width=True)
+                
+            st.markdown("### 📋 Lista de Colaboradores Ativos")
+            df_display = df_pessoas[["name", "email", "job_title", "unit_name"]].copy()
+            df_display.columns = ["Nome", "E-mail", "Cargo", "Loja / Unidade"]
+            st.dataframe(df_display, use_container_width=True, hide_index=True)
+        else:
+            st.info("Nenhum colaborador encontrado na extração detalhada.")
     else:
-        st.info("👈 Insira as credenciais no menu lateral e clique em Sincronizar para visualizar os dados de RH.")
+        st.info("👈 Clique em '🚀 Sincronizar Estrutura' no menu lateral para carregar os dados ao vivo da InCicle.")
