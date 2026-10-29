@@ -7,6 +7,7 @@ import pickle
 import re
 import base64
 import requests
+import json
 from datetime import datetime, date, timedelta
 
 # IMPORTAÇÃO DO MÓDULO F360
@@ -1258,7 +1259,8 @@ elif st.session_state.modulo_ativo == "Recursos Humanos (InCicle)":
         with c3: st.markdown(f'<div class="kpi-card"><div class="kpi-label">🏪 Lojas/Unidades</div><div class="kpi-value kpi-green">{len(lojas)}</div><div class="kpi-foot">Unidades de negócio ativas</div></div>', unsafe_allow_html=True)
         with c4: st.markdown(f'<div class="kpi-card"><div class="kpi-label">⚠️ Ponto / Custos</div><div class="kpi-value kpi-red">Pendente</div><div class="kpi-foot">Aguardando API Timesheets</div></div>', unsafe_allow_html=True)
 
-        st.markdown("<br>### Distribuição de Colaboradores por Loja", unsafe_allow_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("### Distribuição de Colaboradores por Loja")
         
         if pessoas:
             df_pessoas = pd.DataFrame(pessoas)
