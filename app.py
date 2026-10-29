@@ -9,6 +9,7 @@ import base64
 import requests
 import json
 import random
+import calendar
 from datetime import datetime, date, timedelta
 
 # IMPORTAÇÃO DO MÓDULO F360
@@ -176,9 +177,13 @@ st.markdown("""
     .stButton > button { border-radius: 8px; border: 1px solid #343D49; background: #171D25; color: #E9EEF3; font-weight: 650; }
     .stButton > button:hover { border-color: #00875A; color: #5CE39A; }
     hr { border-color: #252D37 !important; }
+    
+    /* ESTILOS ADICIONAIS PARA O MÓDULO RH E CALENDÁRIO */
     .list-box { border: 1px solid #28313C; border-radius: 8px; padding: 12px; background: #151B23; min-height: 250px; }
     .list-title { font-size: 14px; font-weight: bold; margin-bottom: 10px; padding-bottom: 5px; border-bottom: 1px solid #28313C;}
-    .list-item { font-size: 13px; padding: 4px 0; color: #D1D5DB; }
+    .list-item { font-size: 13px; padding: 5px 0; color: #D1D5DB; border-bottom: 1px solid #1C232D; }
+    .list-item:last-child { border-bottom: none; }
+    .cal-header { font-weight: bold; text-align: center; color: #8F9AA8; padding-bottom: 10px; font-size: 14px;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -1198,7 +1203,6 @@ elif st.session_state.modulo_ativo == "Recursos Humanos (InCicle)":
     """
     st.markdown(header_html, unsafe_allow_html=True)
     
-    # Função auxiliar para ler o Company ID do token no Streamlit
     def decode_jwt_payload_app(token):
         try:
             payload = token.split(".")[1]
@@ -1208,21 +1212,45 @@ elif st.session_state.modulo_ativo == "Recursos Humanos (InCicle)":
         except Exception:
             return {}
             
-    # Função Mock para simular batidas de ponto baseada na data
+    # Lógica de Classificação das Batidas (Simulador)
     def consultar_ponto_mock(data_selecionada, lista_pessoas):
         random.seed(data_selecionada.toordinal())
-        bateram = []
-        incompletos = []
-        faltas = []
+        
+        excluidos = [
+            "willian oliveira silva",
+            "nayara luperini de oliveira",
+            "rodrigo thomé ferreira",
+            "patrícia taldivo ferreira"
+        ]
+        
+        categorias = {
+            "completos": [],           # Bateram todos os pontos (4 batidas)
+            "falta_saida_int": [],     # Falta saída para o intervalo (1 batida)
+            "falta_volta_int": [],     # Falta volta do intervalo (2 batidas)
+            "falta_saida_trab": [],    # Falta saída do trabalho (3 batidas)
+            "faltas": []               # Não bateram ponto no dia (0 batidas)
+        }
         
         for p in lista_pessoas:
             nome = p.get('name', 'Desconhecido')
-            status = random.choices(["OK", "INCOMPLETO", "FALTA"], weights=[70, 15, 15])[0]
-            if status == "OK": bateram.append(nome)
-            elif status == "INCOMPLETO": incompletos.append(nome)
-            else: faltas.append(nome)
+            if nome.strip().lower() in excluidos:
+                continue
+                
+            status = random.choices(
+                ["4_batidas", "3_batidas", "2_batidas", "1_batida", "0_batidas"],
+                weights=[65, 10, 5, 5, 15]
+            )[0]
             
-        return sorted(bateram), sorted(incompletos), sorted(faltas)
+            if status == "4_batidas": categorias["completos"].append(nome)
+            elif status == "3_batidas": categorias["falta_saida_trab"].append(nome)
+            elif status == "2_batidas": categorias["falta_volta_int"].append(nome)
+            elif status == "1_batida": categorias["falta_saida_int"].append(nome)
+            else: categorias["faltas"].append(nome)
+            
+        for k in categorias:
+            categorias[k].sort()
+            
+        return categorias
     
     with st.sidebar:
         st.markdown("### 🔑 Conexão InCicle")
@@ -1246,21 +1274,18 @@ elif st.session_state.modulo_ativo == "Recursos Humanos (InCicle)":
                         "companyId": str(company_id)
                     }
                     
-                    # 1. Contagem Geral (Core API)
                     registrar_log_incicle("GET /collaborators/count (Contagem Geral)")
                     r_count = requests.get("https://core.backend.incicle.com/api/v1/engineering/collaborators/count", headers=headers)
                     if r_count.status_code == 200: 
                         st.session_state.rh_count = r_count.json()
                         registrar_log_incicle(f"✅ Contagem recebida: {r_count.text}")
                     
-                    # 2. Lojas/Unidades (Engineering API)
                     registrar_log_incicle("GET /engineering/units (Lojas)")
                     r_units = requests.get("https://engineering.backend.incicle.com/engineering/units", headers=headers)
                     if r_units.status_code == 200: 
                         st.session_state.rh_lojas = r_units.json().get("data", [])
                         registrar_log_incicle(f"✅ {len(st.session_state.rh_lojas)} Lojas extraídas.")
                         
-                    # 3. Pessoas e Cargos (Engineering API)
                     registrar_log_incicle("GET /engineering/people (Colaboradores)")
                     r_people = requests.get("https://engineering.backend.incicle.com/engineering/people?per_page=100", headers=headers)
                     if r_people.status_code == 200: 
@@ -1291,45 +1316,73 @@ elif st.session_state.modulo_ativo == "Recursos Humanos (InCicle)":
         with c4: st.markdown(f'<div class="kpi-card"><div class="kpi-label">⚠️ Ponto / Custos</div><div class="kpi-value kpi-red">Pendente</div><div class="kpi-foot">Aguardando API Timesheets</div></div>', unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown('<div class="section-title">📅 Controle de Ponto Diário (Mock / Aguardando API)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">📅 Calendário de Ponto Diário (Simulador)</div>', unsafe_allow_html=True)
         
-        col_cal, col_btn = st.columns([1, 1])
-        with col_cal:
-            data_ponto = st.date_input("Selecione o dia para analisar as batidas", value=date.today(), format="DD/MM/YYYY")
-        with col_btn:
-            st.markdown("<br>", unsafe_allow_html=True)
-            consultar = st.button("🔄 Consultar Batidas do Dia", use_container_width=True)
+        # --- LÓGICA DO CALENDÁRIO INTERATIVO ---
+        if "data_ponto_selecionada" not in st.session_state:
+            st.session_state.data_ponto_selecionada = date.today()
             
-        if consultar or "ponto_consultado" in st.session_state:
-            st.session_state.ponto_consultado = True
-            registrar_log_incicle(f"GET /timesheets (Mock) - Solicitado ponto para {data_ponto.strftime('%d/%m/%Y')}")
+        mes_atual = st.session_state.data_ponto_selecionada.month
+        ano_atual = st.session_state.data_ponto_selecionada.year
+        
+        c_mes, c_ano, _ = st.columns([2, 2, 6])
+        with c_mes:
+            mes_sel = st.selectbox("Mês", range(1, 13), index=mes_atual - 1)
+        with c_ano:
+            ano_sel = st.selectbox("Ano", [2025, 2026, 2027], index=[2025, 2026, 2027].index(ano_atual))
             
-            bateram, incompletos, faltas = consultar_ponto_mock(data_ponto, pessoas)
+        cal = calendar.monthcalendar(ano_sel, mes_sel)
+        dias_semana = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]
+        
+        cols = st.columns(7)
+        for i, col in enumerate(cols):
+            col.markdown(f"<div class='cal-header'>{dias_semana[i]}</div>", unsafe_allow_html=True)
             
-            col_ok, col_inc, col_fal = st.columns(3)
-            with col_ok:
-                st.markdown(f"""
-                <div class="list-box">
-                    <div class="list-title" style="color: #45D483;">🟢 Bateram Ponto ({len(bateram)})</div>
-                    {'<br>'.join([f'<div class="list-item">{n}</div>' for n in bateram]) if bateram else '<div class="list-item">Nenhum registo</div>'}
-                </div>
-                """, unsafe_allow_html=True)
-                
-            with col_inc:
-                st.markdown(f"""
-                <div class="list-box">
-                    <div class="list-title" style="color: #F4C95D;">🟡 Falta bater saída ({len(incompletos)})</div>
-                    {'<br>'.join([f'<div class="list-item">{n}</div>' for n in incompletos]) if incompletos else '<div class="list-item">Nenhum registo</div>'}
-                </div>
-                """, unsafe_allow_html=True)
-                
-            with col_fal:
-                st.markdown(f"""
-                <div class="list-box">
-                    <div class="list-title" style="color: #FF6262;">🔴 Não Bateram ({len(faltas)})</div>
-                    {'<br>'.join([f'<div class="list-item">{n}</div>' for n in faltas]) if faltas else '<div class="list-item">Nenhum registo</div>'}
-                </div>
-                """, unsafe_allow_html=True)
+        for semana in cal:
+            cols = st.columns(7)
+            for i, dia in enumerate(semana):
+                if dia == 0:
+                    cols[i].write("")
+                else:
+                    data_atual = date(ano_sel, mes_sel, dia)
+                    
+                    random.seed(data_atual.toordinal() + 999)
+                    dia_status = random.choices(["🟢", "🟡", "🔴"], weights=[70, 20, 10])[0]
+                    
+                    label = f"{dia_status} {dia}"
+                    if data_atual == st.session_state.data_ponto_selecionada:
+                        label = f"✅ {dia} (Sel.)"
+                        
+                    if cols[i].button(label, key=f"btn_cal_{ano_sel}_{mes_sel}_{dia}", use_container_width=True):
+                        st.session_state.data_ponto_selecionada = data_atual
+                        registrar_log_incicle(f"GET /timesheets (Mock) - Consultando dia {data_atual.strftime('%d/%m/%Y')}")
+                        st.rerun()
+
+        # --- EXIBIÇÃO DAS BATIDAS DO DIA ---
+        categorias = consultar_ponto_mock(st.session_state.data_ponto_selecionada, pessoas)
+        
+        st.markdown(f"<br>### 📋 Espelho de Ponto · {st.session_state.data_ponto_selecionada.strftime('%d/%m/%Y')}", unsafe_allow_html=True)
+        
+        def render_ponto_box(title, color, items, col):
+            cor_dot = "#45D483" if color == "green" else "#F4C95D" if color == "yellow" else "#FF6262"
+            emoji = "🟢" if color == "green" else "🟡" if color == "yellow" else "🔴"
+            
+            html = f'''
+            <div class="list-box" style="margin-bottom: 15px;">
+                <div class="list-title" style="color: {cor_dot};">{emoji} {title} ({len(items)})</div>
+                {'<br>'.join([f'<div class="list-item">{n}</div>' for n in items]) if items else '<div class="list-item">Nenhum registo</div>'}
+            </div>
+            '''
+            col.markdown(html, unsafe_allow_html=True)
+
+        c_top1, c_top2, c_top3 = st.columns(3)
+        render_ponto_box("Bateram todos os pontos", "green", categorias["completos"], c_top1)
+        render_ponto_box("Falta saída para o intervalo", "yellow", categorias["falta_saida_int"], c_top2)
+        render_ponto_box("Falta volta do intervalo", "yellow", categorias["falta_volta_int"], c_top3)
+        
+        c_bot1, c_bot2, _ = st.columns([1.5, 1.5, 0.1])
+        render_ponto_box("Falta saída do trabalho", "yellow", categorias["falta_saida_trab"], c_bot1)
+        render_ponto_box("Não bateram ponto", "red", categorias["faltas"], c_bot2)
         
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("### Distribuição de Colaboradores por Loja")
