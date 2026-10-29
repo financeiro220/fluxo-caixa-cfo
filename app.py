@@ -8,6 +8,7 @@ import re
 import base64
 import requests
 import json
+import random
 from datetime import datetime, date, timedelta
 
 # IMPORTAÇÃO DO MÓDULO F360
@@ -41,7 +42,7 @@ def carregar_logo():
         ".", 
         os.path.dirname(os.path.abspath(__file__)),
         os.getcwd(),
-        r"C:\Users\USUARIO\OneDrive\Área de Trabalho\fluxo-caixa-cfo" # Caminho absoluto forçado
+        r"C:\Users\USUARIO\OneDrive\Área de Trabalho\fluxo-caixa-cfo"
     ]
 
     for pasta in set(pastas_para_tentar):
@@ -63,22 +64,6 @@ if LOGO_BASE64 is None:
     st.toast("⚠️ Imagem da logo não encontrada nem no caminho absoluto do OneDrive.", icon="⚠️")
 
 # ============================================================
-# FUNÇÃO DE AUTENTICAÇÃO INCICLE
-# ============================================================
-def autenticar_incicle(email, senha):
-    url = "https://schedule.backend.incicle.com/api/auth/authenticate"
-    payload = {"email": email, "password": senha}
-    try:
-        resp = requests.post(url, json=payload, timeout=10)
-        if resp.status_code == 200:
-            dados = resp.json()
-            return dados.get("access_token")
-        else:
-            return None
-    except Exception as e:
-        return None
-
-# ============================================================
 # TELA DE LOGIN E VARIÁVEIS DE SESSÃO
 # ============================================================
 try:
@@ -87,14 +72,34 @@ try:
 except Exception:
     LOGIN_USUARIO, LOGIN_SENHA = "financeiro", "borelli2026"
 
-if "autenticado" not in st.session_state:
-    st.session_state.autenticado = False
+if "autenticado" not in st.session_state: st.session_state.autenticado = False
+if "uploader_key" not in st.session_state: st.session_state.uploader_key = 0
+if "modulo_ativo" not in st.session_state: st.session_state.modulo_ativo = "Financeiro (F360)"
+if "log_incicle" not in st.session_state: st.session_state.log_incicle = []
 
-if "uploader_key" not in st.session_state:
-    st.session_state.uploader_key = 0
+def registrar_log_incicle(mensagem):
+    hora = datetime.now().strftime("%H:%M:%S")
+    st.session_state.log_incicle.insert(0, f"[{hora}] {mensagem}")
 
-if "modulo_ativo" not in st.session_state:
-    st.session_state.modulo_ativo = "Financeiro (F360)"
+# ============================================================
+# FUNÇÃO DE AUTENTICAÇÃO INCICLE
+# ============================================================
+def autenticar_incicle(email, senha):
+    url = "https://schedule.backend.incicle.com/api/auth/authenticate"
+    payload = {"email": email, "password": senha}
+    registrar_log_incicle(f"A iniciar autenticação para {email}...")
+    try:
+        resp = requests.post(url, json=payload, timeout=10)
+        if resp.status_code == 200:
+            dados = resp.json()
+            registrar_log_incicle("✅ Autenticação bem sucedida. Token recebido.")
+            return dados.get("access_token")
+        else:
+            registrar_log_incicle(f"❌ Erro de autenticação ({resp.status_code}): {resp.text}")
+            return None
+    except Exception as e:
+        registrar_log_incicle(f"❌ Falha de conexão: {str(e)}")
+        return None
 
 if not st.session_state.autenticado:
     st.markdown("""
@@ -107,7 +112,6 @@ if not st.session_state.autenticado:
     col_esq, col_meio, col_dir = st.columns([1, 1.2, 1])
     with col_meio:
         st.markdown("<br><br><br>", unsafe_allow_html=True)
-        
         if LOGO_BASE64:
             st.markdown(
                 f"<div style='text-align:center;'><img src='data:image/png;base64,{LOGO_BASE64}' style='max-height:140px; margin-bottom:15px;'></div>"
@@ -132,7 +136,6 @@ if not st.session_state.autenticado:
                 st.rerun()
             else:
                 st.error("Usuário ou senha incorretos.")
-
     st.stop()
 
 # ============================================================
@@ -173,6 +176,9 @@ st.markdown("""
     .stButton > button { border-radius: 8px; border: 1px solid #343D49; background: #171D25; color: #E9EEF3; font-weight: 650; }
     .stButton > button:hover { border-color: #00875A; color: #5CE39A; }
     hr { border-color: #252D37 !important; }
+    .list-box { border: 1px solid #28313C; border-radius: 8px; padding: 12px; background: #151B23; min-height: 250px; }
+    .list-title { font-size: 14px; font-weight: bold; margin-bottom: 10px; padding-bottom: 5px; border-bottom: 1px solid #28313C;}
+    .list-item { font-size: 13px; padding: 4px 0; color: #D1D5DB; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -188,7 +194,7 @@ MAPA_CNPJ_LOJA = {
 }
 
 # ============================================================
-# FUNÇÕES E SISTEMA DE MEMÓRIA LOCAL
+# FUNÇÕES E SISTEMA DE MEMÓRIA LOCAL DO FINANCEIRO
 # ============================================================
 if 'fluxo_oficial_cache' not in st.session_state:
     st.session_state.fluxo_oficial_cache = {}
@@ -493,7 +499,7 @@ if st.session_state.modulo_ativo == "Financeiro (F360)":
             if os.path.exists(CACHE_EXCEL_FILE):
                 os.remove(CACHE_EXCEL_FILE)
                 
-            chaves_para_manter = ["autenticado", "uploader_key", "modulo_ativo"]
+            chaves_para_manter = ["autenticado", "uploader_key", "modulo_ativo", "log_incicle"]
             for chave in list(st.session_state.keys()):
                 if chave not in chaves_para_manter:
                     del st.session_state[chave]
@@ -1201,6 +1207,22 @@ elif st.session_state.modulo_ativo == "Recursos Humanos (InCicle)":
             return json.loads(decoded)
         except Exception:
             return {}
+            
+    # Função Mock para simular batidas de ponto baseada na data
+    def consultar_ponto_mock(data_selecionada, lista_pessoas):
+        random.seed(data_selecionada.toordinal())
+        bateram = []
+        incompletos = []
+        faltas = []
+        
+        for p in lista_pessoas:
+            nome = p.get('name', 'Desconhecido')
+            status = random.choices(["OK", "INCOMPLETO", "FALTA"], weights=[70, 15, 15])[0]
+            if status == "OK": bateram.append(nome)
+            elif status == "INCOMPLETO": incompletos.append(nome)
+            else: faltas.append(nome)
+            
+        return sorted(bateram), sorted(incompletos), sorted(faltas)
     
     with st.sidebar:
         st.markdown("### 🔑 Conexão InCicle")
@@ -1225,16 +1247,25 @@ elif st.session_state.modulo_ativo == "Recursos Humanos (InCicle)":
                     }
                     
                     # 1. Contagem Geral (Core API)
+                    registrar_log_incicle("GET /collaborators/count (Contagem Geral)")
                     r_count = requests.get("https://core.backend.incicle.com/api/v1/engineering/collaborators/count", headers=headers)
-                    if r_count.status_code == 200: st.session_state.rh_count = r_count.json()
+                    if r_count.status_code == 200: 
+                        st.session_state.rh_count = r_count.json()
+                        registrar_log_incicle(f"✅ Contagem recebida: {r_count.text}")
                     
                     # 2. Lojas/Unidades (Engineering API)
+                    registrar_log_incicle("GET /engineering/units (Lojas)")
                     r_units = requests.get("https://engineering.backend.incicle.com/engineering/units", headers=headers)
-                    if r_units.status_code == 200: st.session_state.rh_lojas = r_units.json().get("data", [])
+                    if r_units.status_code == 200: 
+                        st.session_state.rh_lojas = r_units.json().get("data", [])
+                        registrar_log_incicle(f"✅ {len(st.session_state.rh_lojas)} Lojas extraídas.")
                         
                     # 3. Pessoas e Cargos (Engineering API)
-                    r_people = requests.get("https://engineering.backend.incicle.com/engineering/people?per_page=150", headers=headers)
-                    if r_people.status_code == 200: st.session_state.rh_pessoas = r_people.json().get("data", [])
+                    registrar_log_incicle("GET /engineering/people (Colaboradores)")
+                    r_people = requests.get("https://engineering.backend.incicle.com/engineering/people?per_page=100", headers=headers)
+                    if r_people.status_code == 200: 
+                        st.session_state.rh_pessoas = r_people.json().get("data", [])
+                        registrar_log_incicle(f"✅ {len(st.session_state.rh_pessoas)} Colaboradores extraídos.")
                         
                     st.success("✅ Organograma sincronizado com sucesso!")
                 else:
@@ -1259,6 +1290,47 @@ elif st.session_state.modulo_ativo == "Recursos Humanos (InCicle)":
         with c3: st.markdown(f'<div class="kpi-card"><div class="kpi-label">🏪 Lojas/Unidades</div><div class="kpi-value kpi-green">{len(lojas)}</div><div class="kpi-foot">Unidades de negócio ativas</div></div>', unsafe_allow_html=True)
         with c4: st.markdown(f'<div class="kpi-card"><div class="kpi-label">⚠️ Ponto / Custos</div><div class="kpi-value kpi-red">Pendente</div><div class="kpi-foot">Aguardando API Timesheets</div></div>', unsafe_allow_html=True)
 
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown('<div class="section-title">📅 Controle de Ponto Diário (Mock / Aguardando API)</div>', unsafe_allow_html=True)
+        
+        col_cal, col_btn = st.columns([1, 1])
+        with col_cal:
+            data_ponto = st.date_input("Selecione o dia para analisar as batidas", value=date.today(), format="DD/MM/YYYY")
+        with col_btn:
+            st.markdown("<br>", unsafe_allow_html=True)
+            consultar = st.button("🔄 Consultar Batidas do Dia", use_container_width=True)
+            
+        if consultar or "ponto_consultado" in st.session_state:
+            st.session_state.ponto_consultado = True
+            registrar_log_incicle(f"GET /timesheets (Mock) - Solicitado ponto para {data_ponto.strftime('%d/%m/%Y')}")
+            
+            bateram, incompletos, faltas = consultar_ponto_mock(data_ponto, pessoas)
+            
+            col_ok, col_inc, col_fal = st.columns(3)
+            with col_ok:
+                st.markdown(f"""
+                <div class="list-box">
+                    <div class="list-title" style="color: #45D483;">🟢 Bateram Ponto ({len(bateram)})</div>
+                    {'<br>'.join([f'<div class="list-item">{n}</div>' for n in bateram]) if bateram else '<div class="list-item">Nenhum registo</div>'}
+                </div>
+                """, unsafe_allow_html=True)
+                
+            with col_inc:
+                st.markdown(f"""
+                <div class="list-box">
+                    <div class="list-title" style="color: #F4C95D;">🟡 Falta bater saída ({len(incompletos)})</div>
+                    {'<br>'.join([f'<div class="list-item">{n}</div>' for n in incompletos]) if incompletos else '<div class="list-item">Nenhum registo</div>'}
+                </div>
+                """, unsafe_allow_html=True)
+                
+            with col_fal:
+                st.markdown(f"""
+                <div class="list-box">
+                    <div class="list-title" style="color: #FF6262;">🔴 Não Bateram ({len(faltas)})</div>
+                    {'<br>'.join([f'<div class="list-item">{n}</div>' for n in faltas]) if faltas else '<div class="list-item">Nenhum registo</div>'}
+                </div>
+                """, unsafe_allow_html=True)
+        
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("### Distribuição de Colaboradores por Loja")
         
@@ -1287,7 +1359,12 @@ elif st.session_state.modulo_ativo == "Recursos Humanos (InCicle)":
             df_display = df_pessoas[["name", "email", "job_title", "unit_name"]].copy()
             df_display.columns = ["Nome", "E-mail", "Cargo", "Loja / Unidade"]
             st.dataframe(df_display, use_container_width=True, hide_index=True)
-        else:
-            st.info("Nenhum colaborador encontrado na extração detalhada.")
+            
+        with st.expander("🔎 LOG DA API INCICLE (RH & Ponto)", expanded=False):
+            if st.session_state.log_incicle:
+                st.code("\n".join(st.session_state.log_incicle), language="text")
+            else:
+                st.info("Nenhum log gerado ainda.")
+                
     else:
         st.info("👈 Clique em '🚀 Sincronizar Estrutura' no menu lateral para carregar os dados ao vivo da InCicle.")
