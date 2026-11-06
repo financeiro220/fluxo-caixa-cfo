@@ -838,7 +838,7 @@ if st.session_state.modulo_ativo == "Financeiro (F360)":
                     text=alt.Text('Rotulo:N')
                 )
                 
-                st.altair_chart((barras + textos).properties(height=280), use_container_width=True)
+                st.altair_chart((barras + textos).properties(height=280), use_container_width=True, theme=None)
             else:
                 st.info("Anexe o export 'Fluxo de Caixa.xlsx' para visualizar o fluxo diário oficial.")
 
@@ -895,7 +895,7 @@ if st.session_state.modulo_ativo == "Financeiro (F360)":
                     text=alt.Text('Rotulo:N')
                 )
                 
-                st.altair_chart((barras_comp + textos_comp).properties(height=280), use_container_width=True)
+                st.altair_chart((barras_comp + textos_comp).properties(height=280), use_container_width=True, theme=None)
             else:
                 st.info("Sincronize a API para visualizar a composição das despesas.")
 
@@ -1406,7 +1406,7 @@ elif st.session_state.modulo_ativo == "Recursos Humanos (InCicle)":
                     x=alt.X("Headcount:Q", title=""),
                     y=alt.Y("Loja / Unidade:N", sort="-x", title="")
                 ).mark_bar(color="#69B7FF", cornerRadiusEnd=3)
-                st.altair_chart(grafico.properties(height=250), use_container_width=True)
+                st.altair_chart(grafico.properties(height=250), use_container_width=True, theme=None)
                 
             st.markdown("### 📋 Lista de Colaboradores Ativos")
             df_display = df_pessoas[["name", "email", "job_title", "unit_name"]].copy()
